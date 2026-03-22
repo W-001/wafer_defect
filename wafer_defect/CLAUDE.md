@@ -111,29 +111,22 @@ L_metric = SupCon(拉近同类/推远异类)
 
 ## 开发规范
 
+### Git 自动同步
+- 每次 `git commit` 后**自动推送到 GitHub** (post-commit hook)
+
 ### 代码更新流程
 
-1. **修改代码后自动同步**：
-   - 每次代码变更后自动执行 `git add` 和 `git commit`
-   - Commit 信息格式: `type(scope): description`
-   - 自动推送到 GitHub
+1. **修改代码** → `git add` → `git commit`
 
-2. **TODO.md 同步更新**：
+2. **TODO.md 手动更新**：
    - 完成新功能后更新 TODO.md 对应状态
    - 添加新的 TODO 项时说明优先级
 
 3. **Commit 信息规范**：
    ```
    feat(gate): 实现基于能量分数的动态阈值
-   - 添加能量阈值计算逻辑
-   - 更新 gate 决策函数支持自适应阈值
-
    fix(fusion): 修复多视角权重为NaN的问题
-   - 当视角特征全零时添加eps保护
-
-   docs(train): 更新训练脚本参数说明
-   - 添加 --freeze_backbone 参数
-   - 更新 README.md
+   docs(dataset): 更新数据集加载说明
    ```
 
 ### 新增模块检查清单
@@ -141,8 +134,8 @@ L_metric = SupCon(拉近同类/推远异类)
 - [ ] 在 `models/__init__.py` 中导出
 - [ ] 在 `losses/__init__.py` 中导出 (如适用)
 - [ ] 添加单元测试 (如适用)
-- [ ] 更新 TODO.md 状态
-- [ ] 更新本文件 (如需新增命令)
+- [ ] 手动更新 TODO.md 状态
+- [ ] 手动更新本文件 (如需新增命令)
 
 ## 关键文件
 
