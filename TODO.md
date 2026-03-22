@@ -74,96 +74,34 @@
 ```
 wafer_defect/
 ├── configs/base.yaml           # 配置文件
-├── data/
-│   └── dataset.py             # 数据集 + 合成数据生成
-│       ├── WaferDefectSample   # 样本结构
-│       ├── SyntheticWaferGenerator  # 合成晶圆图片
-│       ├── WaferDefectDataset  # PyTorch Dataset
-│       └── generate_synthetic_dataset()  # 数据集生成
+├── data/dataset.py            # 数据集 + 合成数据生成
 ├── models/
 │   ├── backbone.py            # DINOv3 backbone 封装
-│   ├── fusion.py             # 三视角融合 (mean/attention/gated)
-│   ├── gate_head.py          # Nuisance vs Defect 二分类
-│   ├── fine_head.py          # Defect 细分类 + 原型分类器
-│   ├── anomaly_head.py       # 异常检测 (类中心/kNN/energy)
-│   └── full_model.py         # 完整模型 + 简化模型
-├── losses/
-│   └── __init__.py           # GateLoss, FineLoss, MetricLoss, CenterLoss, CombinedLoss
-├── engine/
-│   └── trainer.py            # 训练引擎
-├── utils/
-│   └── metrics.py            # GateMetrics, FineMetrics, AnomalyMetrics
+│   ├── fusion.py             # 三视角融合
+│   ├── gate_head.py          # Nuisance vs Defect
+│   ├── fine_head.py          # Defect细分类
+│   ├── anomaly_head.py       # 异常检测
+│   └── full_model.py         # 完整模型
+├── losses/__init__.py        # 损失函数
+├── engine/trainer.py         # 训练引擎
+├── utils/metrics.py          # 评估指标
 └── train.py                  # 主训练脚本
 ```
 
 ---
 
-## 四、核心模块说明
+## 四、运行方式
 
-### 4.1 数据流
-```
-输入: [B, 3, C, H, W]  # 3视角图片
-  ↓
-backbone: 提取每视角特征 [B*3, D]
-  ↓
-fusion: 3视角融合 [B, D]
-  ↓
-gate: Nuisance vs Defect → 0/1
-  ↓
-fine: Defect类型分类 → 1~K (仅当 gate=1)
-  ↓
-anomaly: 到类中心的距离 → 异常分数
-```
-
-### 4.2 损失函数
-```
-L_total = L_gate + λ1 * L_fine + λ2 * L_metric
-  L_gate = weighted_CE(Nuisance vs Defect, defect_weight=3.0)
-  L_fine = CE(Defect细分类, 仅在is_defect=True样本上)
-  L_metric = SupCon(拉近同类, 推远异类)
-```
-
-### 4.3 推理流程
-```python
-if gate_pred == 0:
-    return "Nuisance"
-else:
-    defect_type = fine_pred
-    if anomaly_score > threshold:
-        return "Unknown Defect"
-    else:
-        return f"Defect-{defect_type}"
+```shell
+# DINOv3 backbone (GPU)
+cd C:/Code/Work/DefectClass_dinov3
+PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py \
+    --use_dinov3 --epochs 10 --num_samples 200 --device cuda
 ```
 
 ---
 
-## 五、运行方式
-
-### 5.1 使用 DINOv3 backbone (GPU)
-```shell
-cd C:/Code/Work/DefectClass_dinov3
-PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py \
-    --use_dinov3 \
-    --epochs 10 \
-    --num_samples 200 \
-    --num_defect_classes 10 \
-    --batch_size 4 \
-    --device cuda
-```
-
-### 5.2 使用简单 CNN backbone (快速测试)
-```shell
-cd C:/Code/Work/DefectClass_dinov3
-PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py \
-    --epochs 10 \
-    --num_samples 200 \
-    --num_defect_classes 10 \
-    --device cpu
-```
-
----
-
-## 六、待完成 (TODO)
+## 五、待完成 (TODO)
 
 ### 高优先级
 1. **真实数据集加载**: 实现 `WaferDataset` 读取实际晶圆 SEM 图片
@@ -184,9 +122,8 @@ PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py
 
 ---
 
-## 七、变更记录
+## 六、变更记录
 
 | 时间 | 提交信息 | 变更模块 |
 |------|----------|----------|
 | 2026-03-22 18:53 | feat: initial wafer_defect project | 全部模块 |
-[2026-03-22 19:50:39] Completed via commit: chore(chore: reset TODO.md after hook fix): reset TODO.md after hook fix
