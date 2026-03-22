@@ -124,7 +124,8 @@ PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py
 
 ## 六、变更记录
 
+手动更新。参见 `git log`。
+
 | 时间 | 提交信息 | 变更模块 |
 |------|----------|----------|
 | 2026-03-22 18:53 | feat: initial wafer_defect project | 全部模块 |
-[2026-03-22 19:53:18] Completed via commit: fix(fix: repair auto-sync hooks): repair auto-sync hooks
