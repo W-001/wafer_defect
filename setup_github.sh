@@ -1,0 +1,28 @@
+#!/bin/sh
+# Setup script to configure GitHub remote and auto-sync
+
+echo "=== GitHub Remote Setup ==="
+echo ""
+echo "This script will help you set up automatic sync to GitHub."
+echo ""
+echo "Steps:"
+echo "1. Create a new GitHub repository at: https://github.com/new"
+echo "   - Repository name: wafer_defect"
+echo "   - Make it Private or Public as needed"
+echo "   - DO NOT initialize with README, .gitignore, or license"
+echo ""
+echo "2. After creating the repo, copy the repository URL"
+echo "   It should look like: https://github.com/YOUR_USERNAME/wafer_defect.git"
+echo ""
+echo "3. Run this command to add the remote:"
+echo ""
+echo "   cd C:/Code/Work/DefectClass_dinov3"
+echo "   git remote add origin https://github.com/YOUR_USERNAME/wafer_defect.git"
+echo "   git push -u origin master"
+echo ""
+echo "=== Current Git Status ==="
+cd "C:/Code/Work/DefectClass_dinov3"
+git remote -v
+echo ""
+echo "=== Hooks Installed ==="
+ls -la .git/hooks/*.sh .git/hooks/post-commit .git/hooks/commit-msg 2>/dev/null || echo "Checking hooks..."

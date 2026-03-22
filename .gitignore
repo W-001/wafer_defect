@@ -40,10 +40,15 @@ venv.bak/
 *.swo
 *~
 
+# HuggingFace models (从 HuggingFace 自动下载，无需 git 跟踪)
+dinov3-vitl16-pretrain-lvd1689m/
+dinov3-vitl16-pretrain-sat493m/
+
 # Model weights
 *.pth
 *.pt
 *.ckpt
+*.safetensors
 
 # Data
 *.png
