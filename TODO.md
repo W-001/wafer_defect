@@ -181,3 +181,12 @@ PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py
 1. **多产品/批次分组评估**: 按产品型号分组统计
 2. **主动学习闭环**: 难例自动标注回流
 3. **DINOv3 微调**: 解除 backbone freeze 进行 fine-tuning
+
+---
+
+## 七、变更记录
+
+| 时间 | 提交信息 | 变更模块 |
+|------|----------|----------|
+| 2026-03-22 18:53 | feat: initial wafer_defect project | 全部模块 |
+
