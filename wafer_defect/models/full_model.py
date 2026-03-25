@@ -4,6 +4,7 @@ Full Wafer Defect Classification Model.
 
 import torch
 import torch.nn as nn
+import numpy as np
 
 from .backbone import DINOv3Backbone
 from .fusion import MultiViewFusion
@@ -20,6 +21,10 @@ class WaferDefectModel(nn.Module):
     - Gate head (Nuisance vs Defect)
     - Fine head (defect type classification)
     - Anomaly head (unknown defect detection)
+
+    Unknown defect detection:
+    When a sample is classified as Defect by Gate but is far from all known
+    defect class centers (high anomaly score), it's marked as "unknown defect".
     """
 
     def __init__(
@@ -41,8 +46,6 @@ class WaferDefectModel(nn.Module):
         self.num_defect_classes = num_defect_classes
         self.use_anomaly_head = use_anomaly_head
         self.use_uncertainty = use_uncertainty
-
-        # Backbone
         self.backbone = DINOv3Backbone(
             model_name=backbone_name,
             pretrained_path=pretrained_path,
@@ -97,11 +100,13 @@ class WaferDefectModel(nn.Module):
             dict with:
                 - gate_logits: [B, 2]
                 - gate_prob: [B, 2]
-                - is_defect_pred: [B]
+                - is_defect_pred: [B] (0=Nuisance, 1=Defect)
                 - fine_logits: [B, num_defect_classes]
-                - fine_pred: [B]
+                - fine_prob: [B, num_defect_classes]
+                - fine_pred: [B] (predicted defect type)
+                - is_unknown_defect: [B] (1=unknown/ novel defect, 0=known defect)
+                - anomaly_score: [B]
                 - feat: [B, D] fused features (if return_features)
-                - anomaly_score: [B] (if use_anomaly_head)
                 - uncertainty: [B] (if use_uncertainty)
         """
         B, V, C, H, W = images.shape
@@ -129,11 +134,24 @@ class WaferDefectModel(nn.Module):
         if self.use_uncertainty:
             uncertainty = self.uncertainty(fused_feat)
 
-        # Anomaly score
+        # Anomaly detection
         anomaly_score = None
+        is_unknown_defect = None
         if self.use_anomaly_head:
             anomaly_out = self.anomaly(fused_feat)
             anomaly_score = anomaly_out["anomaly_score"]
+
+            # Use z-score based threshold (2.0 = more than 2 std from mean)
+            # This is more interpretable than raw anomaly scores
+            is_defect_mask = gate_out["is_defect_pred"] == 1
+            is_unknown_defect = torch.zeros(B, dtype=torch.long, device=images.device)
+
+            # Only apply threshold if statistics are meaningful
+            dist_std = self.anomaly.dist_std.item()
+            if dist_std > 1e-6:
+                is_unknown_defect[is_defect_mask] = (
+                    anomaly_score[is_defect_mask] > 2.0  # z-score threshold
+                ).long()
 
         result = {
             "gate_logits": gate_out["logits"],
@@ -142,6 +160,7 @@ class WaferDefectModel(nn.Module):
             "fine_logits": fine_out["logits"],
             "fine_prob": fine_out["prob"],
             "fine_pred": fine_out["pred"],
+            "is_unknown_defect": is_unknown_defect,
         }
 
         if return_features:
@@ -159,6 +178,54 @@ class WaferDefectModel(nn.Module):
         """Update class centers for anomaly detection."""
         if self.use_anomaly_head:
             self.anomaly.update_centers(feats, labels)
+
+    def calibrate_anomaly_threshold(
+        self,
+        train_loader,
+        device: str = "cuda",
+        percentile: float = 95
+    ):
+        """
+        Final calibration of anomaly detection statistics from full training set.
+        Updates normalization statistics using all known defect samples.
+
+        Args:
+            train_loader: DataLoader with training samples
+            device: Device to run on
+            percentile: Percentile for threshold calibration (default 95)
+        """
+        if not self.use_anomaly_head:
+            return
+
+        self.eval()
+        all_feats = []
+        defect_mask = []
+
+        with torch.no_grad():
+            for batch in train_loader:
+                images = batch["images"].to(device)
+                is_defect = batch["is_defect"].to(device)
+
+                outputs = self.forward(images, return_features=True)
+                all_feats.append(outputs["feat"].cpu())
+                defect_mask.append((is_defect == 1).cpu())
+
+        all_feats = torch.cat(all_feats, dim=0)
+        defect_mask = torch.cat(defect_mask, dim=0)
+
+        if defect_mask.sum() > 0:
+            # Update statistics from all training defects
+            self.anomaly.update_statistics(all_feats, defect_mask)
+
+            # Calculate reference threshold
+            outputs = self.anomaly(all_feats[defect_mask])
+            dists = outputs["anomaly_score"].cpu().numpy()
+            threshold = np.percentile(dists, percentile)
+
+            print(f"[Anomaly Detection] Final calibration:")
+            print(f"  Known defect anomaly scores: mean={dists.mean():.4f}, std={dists.std():.4f}")
+            print(f"  Threshold (percentile={percentile}): {threshold:.4f}")
+            print(f"  → Samples with score > {threshold:.4f} will be flagged as unknown defects")
 
 
 class WaferDefectModelSimple(nn.Module):

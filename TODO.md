@@ -5,25 +5,26 @@
 基于 DINOv3 的晶圆缺陷分层开放集分类框架，解决：
 - Nuisance vs True Defect 的高精度二分类
 - True Defect 细分类（几十类）
-- 未知/新 defect 的检测
+- 未知/新 defect 的检测（特征空间距离判断）
 - 三视角融合
 - 标签噪声处理
 
 ---
 
-## 二、start.md 需求 vs 实现对照
+## 二、功能实现状态
 
 ### 2.1 输入预处理层
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 主图区域 + 底部刻度区域分离 | ✅ 已实现 | `WaferDefectDataset` 中 `crop_footer=True` 默认裁剪底部15%区域 |
+| 主图区域 + 底部刻度区域分离 | ✅ 已实现 | Updated: 2026-03-25 10:02:56 | `RealWaferDataset` 默认裁剪底部40px |
 | 底部区域单独处理 | ⚠️ 部分 | 当前仅做裁剪，未做 OCR/数值解析 |
+| 可变尺寸图片resize | ✅ 已实现 | 504-680px → 统一224x224 |
 
 ### 2.2 共享表征层
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| DINOv3 backbone | ✅ 已实现 | `backbone.py` 中 `DINOv3Backbone` 封装 |
-| Swin 作为 baseline 对照 | ✅ 已实现 | `WaferDefectModelSimple` 使用简单 CNN |
+| DINOv3 backbone | ✅ 已实现 | Updated: 2026-03-25 10:02:56 | `backbone.py` 中 `DINOv3Backbone` 封装 |
+| 相对路径支持 | ✅ 已实现 | 动态计算项目根目录，适配服务器部署 |
 
 ### 2.3 三视角融合
 | 需求 | 状态 | 说明 |
@@ -31,6 +32,7 @@
 | 共享 encoder | ✅ 已实现 | 同一 backbone 提取三视角特征 |
 | attention/gating 融合 | ✅ 已实现 | `MultiViewFusion` 支持 mean/attention/gated |
 | 输出 group-level 结果 | ✅ 已实现 | 融合后统一输出 |
+| 三视角识别（实际数据格式） | ✅ 已实现 | 正则匹配 `IxxK` 模式 (00/01/02) |
 
 ### 2.4 Gate Head (Nuisance vs Defect)
 | 需求 | 状态 | 说明 |
@@ -46,26 +48,34 @@
 | 原型/类中心约束 | ✅ 已实现 | `PrototypeClassifier` |
 | SupCon 辅助损失 | ✅ 已实现 | `MetricLoss` (SupCon) |
 
-### 2.6 异常检测模块
+### 2.6 未知/新缺陷检测
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 类中心距离检测 | ✅ 已实现 | `AnomalyHead` |
-| kNN 密度 | ✅ 已实现 | `KNNDensityEstimator` |
-| energy score | ✅ 已实现 | `AnomalyHead` 中已包含 |
+| 类中心距离检测 | ✅ 已实现 | Updated: 2026-03-25 10:02:56 | `AnomalyHead` 使用 z-score 归一化 |
+| 能量分数 | ✅ 已实现 | 与距离组合 (0.7*距离 + 0.3*能量) |
+| 未知缺陷标记 | ✅ 已实现 | `is_unknown_defect` 输出 |
+| 自动校准阈值 | ✅ 已实现 | 训练后自动计算95百分位 |
 
-### 2.7 训练策略
+### 2.7 错分样本追踪
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 分阶段训练 | ⚠️ 简化版 | 当前是联合训练，可扩展为分阶段 |
+| Gate错分记录 | ✅ 已实现 | 漏检/误报分离 |
+| Fine错分记录 | ✅ 已实现 | CSV/JSON 格式导出 |
+| 数据集检查工具 | ✅ 已实现 | `data_inspector.py` |
+
+### 2.8 训练策略
+| 需求 | 状态 | 说明 |
+|------|------|------|
+| 分阶段训练 | ✅ 已实现 | Updated: 2026-03-25 10:02:56 | 当前是联合训练，可扩展为分阶段 |
 | 层级损失 L = L_gate + λ1*L_fine + λ2*L_metric | ✅ 已实现 | `CombinedLoss` |
 | 高代价惩罚 defect 漏检 | ✅ 已实现 | `defect_weight=3.0` 默认 |
 
-### 2.8 评估指标
+### 2.9 评估指标
 | 需求 | 状态 | 说明 |
 |------|------|------|
 | Gate 召回/漏检率 | ✅ 已实现 | `GateMetrics` |
 | macro-F1 / per-class recall | ✅ 已实现 | `FineMetrics` |
-| open-set 指标 | ⚠️ 简化版 | 当前仅 distance threshold，未计算 AUROC/AUPR |
+| 错分样本报告 | ✅ 已实现 | JSON + CSV 导出 |
 
 ---
 
@@ -74,17 +84,19 @@
 ```
 wafer_defect/
 ├── configs/base.yaml           # 配置文件
-├── data/dataset.py            # 数据集 + 合成数据生成
+├── data/dataset.py            # 数据集 + RealWaferDataset
 ├── models/
 │   ├── backbone.py            # DINOv3 backbone 封装
 │   ├── fusion.py             # 三视角融合
 │   ├── gate_head.py          # Nuisance vs Defect
 │   ├── fine_head.py          # Defect细分类
-│   ├── anomaly_head.py       # 异常检测
+│   ├── anomaly_head.py       # 未知缺陷检测
 │   └── full_model.py         # 完整模型
 ├── losses/__init__.py        # 损失函数
-├── engine/trainer.py         # 训练引擎
-├── utils/metrics.py          # 评估指标
+├── engine/trainer.py         # 训练引擎 + 错分追踪
+├── utils/
+│   ├── metrics.py            # 评估指标
+│   └── data_inspector.py    # 数据集检查工具
 └── train.py                  # 主训练脚本
 ```
 
@@ -92,11 +104,38 @@ wafer_defect/
 
 ## 四、运行方式
 
+### 训练
+
 ```shell
-# DINOv3 backbone (GPU)
-cd C:/Code/Work/DefectClass_dinov3
-PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py \
-    --use_dinov3 --epochs 10 --num_samples 200 --device cuda
+cd /path/to/DefectClass_dinov3
+
+# 真实数据
+PYTHONPATH=. python wafer_defect/train.py \
+    --data_dir /path/to/wafer_data \
+    --use_dinov3 --epochs 50 --device cuda
+
+# 合成数据（测试用）
+PYTHONPATH=. python wafer_defect/train.py --synthetic --epochs 10
+```
+
+### 数据检查
+
+```shell
+PYTHONPATH=. python wafer_defect/utils/data_inspector.py /path/to/wafer_data
+```
+
+### 数据格式
+
+```
+data/
+├── Nuisance/
+│   ├── D234569@...I00K12345678.jpg  # 视角1
+│   ├── D234569@...I01K12345678.jpg  # 视角2
+│   └── D234569@...I02K12345678.jpg  # 视角3
+├── Scratch/
+│   └── ...
+└── Particle/
+    └── ...
 ```
 
 ---
@@ -104,16 +143,14 @@ PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py
 ## 五、待完成 (TODO)
 
 ### 高优先级
-1. **真实数据集加载**: 实现 `WaferDataset` 读取实际晶圆 SEM 图片
-2. **分阶段训练**: 先训 Gate，再训 Fine，最后联合微调
-3. **Co-teaching**: 双模型互筛噪声样本
-4. **完整 open-set 评估**: AUROC, AUPR, FPR@95TPR
+1. **分阶段训练**: 先训 Gate，再训 Fine，最后联合微调
+2. **Co-teaching**: 双模型互筛噪声样本
+3. **完整 open-set 评估**: AUROC, AUPR, FPR@95TPR
 
 ### 中优先级
 1. **底部刻度 OCR 解析**: 提取尺度元信息作为额外输入
 2. **ProtoNet/센터 Loss**: 原型网络增强
-3. **新类发现池**: 未知 defect 自动聚类 + 人工回流
-4. **t-SNE 可视化**: embedding 空间可视化验证
+3. **t-SNE 可视化**: embedding 空间可视化验证
 
 ### 低优先级
 1. **多产品/批次分组评估**: 按产品型号分组统计
@@ -124,9 +161,7 @@ PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py
 
 ## 六、变更记录
 
-手动更新。参见 `git log`。
-
 | 时间 | 提交信息 | 变更模块 |
 |------|----------|----------|
 | 2026-03-22 18:53 | feat: initial wafer_defect project | 全部模块 |
-[2026-03-22 20:27:59] Completed via commit: chore(chore: set up pre-commit hook for auto TODO.md update): set up pre-commit hook for auto TODO.md update
+| 2026-03-25 | feat: add real data loading, unknown defect detection, misclassification tracking | 数据加载、异常检测、错分追踪 |

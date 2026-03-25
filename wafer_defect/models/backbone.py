@@ -36,10 +36,17 @@ class DINOv3Backbone(nn.Module):
         """Load DINOv3 model from local weights."""
         import sys
         import os
-        sys.path.insert(0, 'C:/Code/Work/DefectClass_dinov3/dinov3')
 
-        # Convert to absolute path and ensure it exists
-        weights_path = os.path.abspath(weights_path)
+        # 动态计算项目根目录（相对于当前文件向上两级）
+        current_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        dinov3_dir = os.path.join(current_dir, 'dinov3')
+        sys.path.insert(0, dinov3_dir)
+
+        # 权重路径：相对于项目根目录
+        if not os.path.isabs(weights_path):
+            weights_path = os.path.join(current_dir, weights_path)
+            weights_path = os.path.abspath(weights_path)
+
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 

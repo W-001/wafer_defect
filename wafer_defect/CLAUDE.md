@@ -24,15 +24,41 @@ conda activate py310
 ### 训练
 
 ```shell
-# DINOv3 backbone (GPU)
 cd C:/Code/Work/DefectClass_dinov3
-PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py \
-    --use_dinov3 --epochs 10 --num_samples 200 --device cuda
 
-# 简单 CNN backbone (快速测试)
-PYTHONPATH=. /c/Users/Xiaofan/.conda/envs/py310/python.exe wafer_defect/train.py \
-    --epochs 10 --num_samples 200 --device cpu
+# 真实数据 (文件夹结构)
+PYTHONPATH=. python wafer_defect/train.py \
+    --data_dir /path/to/wafer_data \
+    --use_dinov3 --epochs 10 --device cuda
+
+# 合成数据 (快速测试)
+PYTHONPATH=. python wafer_defect/train.py \
+    --synthetic --epochs 10 --num_samples 200 --device cpu
 ```
+
+### 数据格式
+
+真实数据文件夹结构:
+```
+data/
+├── Nuisance/
+│   ├── D234569@123456W1234567890F12345678I00K12345678.jpg
+│   ├── D234569@123456W1234567890F12345678I01K12345678.jpg
+│   └── D234569@123456W1234567890F12345678I02K12345678.jpg
+├── Scratch/
+│   └── ...
+└── Particle/
+    └── ...
+```
+
+**三视角识别规则:**
+- 文件名中 `I` 后面 `K` 前面的两位数字(00/01/02)表示同一defect的视角序号
+- `I00K` = 第一视角，`I01K` = 第二视角，`I02K` = 第三视角
+- 三张视角照片组合为一个样本
+
+**路径说明:**
+- 所有路径均使用相对于项目根目录的相对路径
+- 服务器上运行时只需调整 `--data_dir` 参数
 
 ## 自动同步机制
 
