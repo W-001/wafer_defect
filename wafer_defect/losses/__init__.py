@@ -210,9 +210,13 @@ class CombinedLoss(nn.Module):
             "fine": loss_fine
         }
 
-        # Metric loss (SupCon)
+        # Metric loss (SupCon) - only on defect samples
         if self.use_metric_loss:
-            loss_metric = self.metric_loss(features, defect_target)
+            loss_metric = self.metric_loss(
+                features,
+                defect_target,
+                mask=is_defect_target.bool()
+            )
             total_loss = total_loss + self.metric_weight * loss_metric
             losses["metric"] = loss_metric
             losses["total"] = total_loss

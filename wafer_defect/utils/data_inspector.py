@@ -79,6 +79,16 @@ def inspect(data_dir: str, crop_bottom: int = 40, nuisance_name: str = "Nuisance
                     'views': len(group)
                 })
 
+        # Also detect 2-view patterns that were skipped
+        for base, views_dict in _get_base_patterns(img_files).items():
+            if len(views_dict) == 2:
+                incomplete_groups.append({
+                    'class': class_dir.name,
+                    'file': list(views_dict.values())[0].name,
+                    'views': 2,
+                    'note': '2-view sample ignored (needs 3 views)'
+                })
+
         print(f"  [{class_type:8}] {class_dir.name}: {len(groups)} samples ({len(img_files)} images)")
 
     print()
@@ -147,6 +157,24 @@ def inspect(data_dir: str, crop_bottom: int = 40, nuisance_name: str = "Nuisance
     return report
 
 
+def _get_base_patterns(img_files):
+    """Extract base patterns and view indices from image files."""
+    base_patterns = {}
+    for f in img_files:
+        name = f.stem
+        match = re.match(r'(.*I)(\d{2})(K.*)', name)
+        if match:
+            base = match.group(1) + match.group(3)
+            view_idx = int(match.group(2))
+        else:
+            base = name
+            view_idx = 0
+        if base not in base_patterns:
+            base_patterns[base] = {}
+        base_patterns[base][view_idx] = f
+    return base_patterns
+
+
 def _group_three_views(img_files):
     """Group images by defect (same logic as RealWaferDataset)."""
     base_patterns = {}
@@ -171,9 +199,9 @@ def _group_three_views(img_files):
         if len(views_dict) == 3 and set(views_dict.keys()) == {0, 1, 2}:
             groups.append([views_dict[0], views_dict[1], views_dict[2]])
         elif len(views_dict) == 1:
+            # Single view: duplicate to 3 views (same as RealWaferDataset)
             groups.append(list(views_dict.values()) * 3)
-        elif len(views_dict) > 0:
-            groups.append(list(views_dict.values()))
+        # 2-view or other incomplete groups are ignored (consistent with RealWaferDataset)
 
     return groups
 

@@ -23,7 +23,7 @@
 ### 2.2 共享表征层
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| DINOv3 backbone | ✅ 已实现 | Updated: 2026-03-25 10:02:56 | `backbone.py` 中 `DINOv3Backbone` 封装 |
+| DINOv3 backbone | ✅ 已实现 | Updated: 2026-04-01 20:50:03 | Updated: 2026-03-25 10:02:56 | `backbone.py` 中 `DINOv3Backbone` 封装 |
 | 相对路径支持 | ✅ 已实现 | 动态计算项目根目录，适配服务器部署 |
 
 ### 2.3 三视角融合
@@ -51,31 +51,49 @@
 ### 2.6 未知/新缺陷检测
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 类中心距离检测 | ✅ 已实现 | Updated: 2026-03-25 10:02:56 | `AnomalyHead` 使用 z-score 归一化 |
+| 类中心距离检测 | ✅ 已实现 | Updated: 2026-04-01 20:50:03 | `AnomalyHead` 使用 z-score 归一化 |
 | 能量分数 | ✅ 已实现 | 与距离组合 (0.7*距离 + 0.3*能量) |
 | 未知缺陷标记 | ✅ 已实现 | `is_unknown_defect` 输出 |
 | 自动校准阈值 | ✅ 已实现 | 训练后自动计算95百分位 |
+| **RAD 多层 Patch-KNN** | ✅ 已实现 | 2026-04-01 | `RADAnomalyHead` + `--use_rad_anomaly` |
 
-### 2.7 错分样本追踪
+### 2.7 RAD 多层 Patch-KNN 异常检测
+| 需求 | 状态 | 说明 |
+|------|------|------|
+| DINOv3 中间层特征提取 | ✅ 已实现 | 2026-04-01 | `backbone.get_intermediate_layers()` |
+| 多层 Memory Bank 构建 | ✅ 已实现 | 2026-04-01 | `RADAnomalyHead.build_bank()` |
+| Patch 级 KNN 异常评分 | ✅ 已实现 | 2026-04-01 | 多层线性融合 + Gaussian 平滑 |
+| RAD 校准阈值 | ✅ 已实现 | 2026-04-01 | `calibrate()` 方法 |
+| `--use_rad_anomaly` 开关 | ✅ 已实现 | 2026-04-01 | `--rad_layer_indices`, `--rad_k_image` |
+
+### 2.8 错分样本追踪
 | 需求 | 状态 | 说明 |
 |------|------|------|
 | Gate错分记录 | ✅ 已实现 | 漏检/误报分离 |
 | Fine错分记录 | ✅ 已实现 | CSV/JSON 格式导出 |
 | 数据集检查工具 | ✅ 已实现 | `data_inspector.py` |
 
-### 2.8 训练策略
+### 2.9 训练策略
 | 需求 | 状态 | 说明 |
 |------|------|------|
 | 分阶段训练 | ✅ 已实现 | Updated: 2026-03-25 10:02:56 | 当前是联合训练，可扩展为分阶段 |
 | 层级损失 L = L_gate + λ1*L_fine + λ2*L_metric | ✅ 已实现 | `CombinedLoss` |
 | 高代价惩罚 defect 漏检 | ✅ 已实现 | `defect_weight=3.0` 默认 |
 
-### 2.9 评估指标
+### 2.10 评估指标
 | 需求 | 状态 | 说明 |
 |------|------|------|
 | Gate 召回/漏检率 | ✅ 已实现 | `GateMetrics` |
 | macro-F1 / per-class recall | ✅ 已实现 | `FineMetrics` |
 | 错分样本报告 | ✅ 已实现 | JSON + CSV 导出 |
+| 图文 Markdown 报告 | ✅ 已实现 | 2026-04-01 | `generate_markdown_report()` |
+
+### 2.11 模型保存与加载
+| 需求 | 状态 | 说明 |
+|------|------|------|
+| 最佳模型保存 | ✅ 已实现 | 2026-04-01 | 每个 epoch 验证后自动保存 `best_model.pt` |
+| 最终模型保存 | ✅ 已实现 | 2026-04-01 | `last_model.pt` |
+| RAD Bank 保存/加载 | ✅ 已实现 | 2026-04-01 | `build_bank()` / checkpoint 内嵌 |
 
 ---
 
@@ -90,10 +108,11 @@ wafer_defect/
 │   ├── fusion.py             # 三视角融合
 │   ├── gate_head.py          # Nuisance vs Defect
 │   ├── fine_head.py          # Defect细分类
-│   ├── anomaly_head.py       # 未知缺陷检测
+│   ├── anomaly_head.py       # 类中心距离异常检测
+│   ├── rad_head.py           # RAD 多层 Patch-KNN 异常检测
 │   └── full_model.py         # 完整模型
 ├── losses/__init__.py        # 损失函数
-├── engine/trainer.py         # 训练引擎 + 错分追踪
+├── engine/trainer.py         # 训练引擎 + 错分追踪 + Markdown报告
 ├── utils/
 │   ├── metrics.py            # 评估指标
 │   └── data_inspector.py    # 数据集检查工具
@@ -109,10 +128,18 @@ wafer_defect/
 ```shell
 cd /path/to/DefectClass_dinov3
 
-# 真实数据
+# 真实数据 + 类中心异常检测（默认）
 PYTHONPATH=. python wafer_defect/train.py \
     --data_dir /path/to/wafer_data \
     --use_dinov3 --epochs 50 --device cuda
+
+# 真实数据 + RAD 多层 Patch-KNN 异常检测
+PYTHONPATH=. python wafer_defect/train.py \
+    --data_dir /path/to/wafer_data \
+    --use_dinov3 --use_rad_anomaly \
+    --rad_layer_indices 3 6 9 11 \
+    --rad_k_image 5 \
+    --epochs 50 --device cuda
 
 # 合成数据（测试用）
 PYTHONPATH=. python wafer_defect/train.py --synthetic --epochs 10
@@ -165,3 +192,4 @@ data/
 |------|----------|----------|
 | 2026-03-22 18:53 | feat: initial wafer_defect project | 全部模块 |
 | 2026-03-25 | feat: add real data loading, unknown defect detection, misclassification tracking | 数据加载、异常检测、错分追踪 |
+[2026-03-25 10:02:57] Completed via commit: feat(feat: add real data loading, unknown defect detection, and misclassification tracking): add real data loading, unknown defect detection, and misclassification tracking

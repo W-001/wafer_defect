@@ -52,7 +52,10 @@ class AnomalyHead(nn.Module):
             momentum: EMA factor
         """
         # Ensure centers are on same device as feats
-        centers = self.centers.to(feats.device)
+        if self.centers.device != feats.device:
+            self.centers = self.centers.to(feats.device)
+        centers = self.centers
+
         for c in range(self.num_classes):
             mask = labels == c
             if mask.sum() > 0:
@@ -61,11 +64,7 @@ class AnomalyHead(nn.Module):
 
         # Update center statistics for normalization
         if self.training and centers.std() > 0:
-            center_std = self.center_std.to(feats.device)
-            center_std = centers.std()
-            self.center_std = center_std
-
-        self.centers = centers
+            self.center_std = centers.std().to(feats.device)
 
     def forward(self, feat: torch.Tensor) -> dict:
         """
@@ -132,25 +131,27 @@ class AnomalyHead(nn.Module):
         if defect_mask.sum() < 10:  # Need minimum samples
             return
 
+        # Ensure buffers are on same device as feats
+        if self.dist_mean.device != feats.device:
+            self.dist_mean = self.dist_mean.to(feats.device)
+            self.dist_std = self.dist_std.to(feats.device)
+            self.energy_mean = self.energy_mean.to(feats.device)
+            self.energy_std = self.energy_std.to(feats.device)
+
         output = self.forward(feats[defect_mask])
 
         # Update running statistics with EMA
         alpha = 0.9
-
-        dist_mean = self.dist_mean.to(feats.device)
-        dist_std = self.dist_std.to(feats.device)
-        energy_mean = self.energy_mean.to(feats.device)
-        energy_std = self.energy_std.to(feats.device)
 
         dist_mean_new = output["min_dist"].mean()
         dist_std_new = output["min_dist"].std() + 1e-6
         energy_mean_new = output["energy"].mean()
         energy_std_new = output["energy"].std() + 1e-6
 
-        self.dist_mean = dist_mean * alpha + dist_mean_new * (1 - alpha)
-        self.dist_std = dist_std * alpha + dist_std_new * (1 - alpha)
-        self.energy_mean = energy_mean * alpha + energy_mean_new * (1 - alpha)
-        self.energy_std = energy_std * alpha + energy_std_new * (1 - alpha)
+        self.dist_mean = self.dist_mean * alpha + dist_mean_new * (1 - alpha)
+        self.dist_std = self.dist_std * alpha + dist_std_new * (1 - alpha)
+        self.energy_mean = self.energy_mean * alpha + energy_mean_new * (1 - alpha)
+        self.energy_std = self.energy_std * alpha + energy_std_new * (1 - alpha)
 
     def detect_anomaly(
         self,

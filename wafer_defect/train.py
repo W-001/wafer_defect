@@ -10,13 +10,15 @@ Usage:
 """
 
 import argparse
+import os
+import platform
 import torch
 
 from wafer_defect.data.dataset import (
     generate_synthetic_dataset, create_dataloaders, create_real_dataloaders
 )
 from wafer_defect.models import WaferDefectModel, WaferDefectModelSimple
-from wafer_defect.engine.trainer import WaferDefectTrainer
+from wafer_defect.engine.trainer import WaferDefectTrainer, generate_markdown_report
 
 
 def parse_args():
@@ -35,6 +37,16 @@ def parse_args():
                         default="dinov3/weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
                         help="Path to pretrained weights (relative to project root)")
     parser.add_argument("--embed_dim", type=int, default=1024, help="Feature dimension")
+
+    # RAD anomaly detection
+    parser.add_argument("--use_rad_anomaly", action="store_true",
+                        help="Use RAD (multi-layer patch-KNN) instead of class-center anomaly detection")
+    parser.add_argument("--rad_layer_indices", nargs='+', type=int, default=[3, 6, 9, 11],
+                        help="DINOv3 layer indices for RAD bank (0-based, e.g. 3 6 9 11)")
+    parser.add_argument("--rad_k_image", type=int, default=5,
+                        help="Top-K nearest neighbor images for RAD patch-KNN")
+    parser.add_argument("--rad_bank_path", type=str, default=None,
+                        help="Path to pre-built RAD memory bank .pth")
 
     # Data params
     parser.add_argument("--num_samples", type=int, default=200, help="Total samples for synthetic")
@@ -97,11 +109,13 @@ def main():
         num_defect_classes = args.num_defect_classes
         real_dataset = None
     else:
+        # Windows: num_workers=0 to avoid fork issues; Linux servers: use 4
+        real_num_workers = 0 if platform.system() == 'Windows' else 4
         print(f"Loading real data from: {args.data_dir}")
         train_loader, val_loader = create_real_dataloaders(
             data_dir=args.data_dir,
             batch_size=args.batch_size,
-            num_workers=4,
+            num_workers=real_num_workers,
             img_size=args.img_size,
             crop_bottom=args.crop_bottom,
             nuisance_name=args.nuisance_name
@@ -120,8 +134,16 @@ def main():
             backbone_name=args.backbone,
             pretrained_path=args.pretrained_path,
             embed_dim=args.embed_dim,
-            defect_weight=args.defect_weight
+            defect_weight=args.defect_weight,
+            use_rad_anomaly=args.use_rad_anomaly,
+            rad_layer_indices=args.rad_layer_indices,
+            rad_k_image=args.rad_k_image,
+            rad_bank_path=args.rad_bank_path,
         )
+        if args.use_rad_anomaly:
+            print(f"[RAD] Multi-layer patch-KNN anomaly detection enabled")
+            print(f"[RAD] Layer indices: {args.rad_layer_indices}")
+            print(f"[RAD] K nearest images: {args.rad_k_image}")
     else:
         model = WaferDefectModelSimple(
             num_defect_classes=num_defect_classes,
@@ -157,6 +179,8 @@ def main():
     # Training loop
     print("\nStarting training...")
     best_val_loss = float('inf')
+    best_epoch = 0
+    history = []
 
     for epoch in range(1, args.epochs + 1):
         print(f"\n{'=' * 60}")
@@ -183,18 +207,51 @@ def main():
               f"Macro F1: {val_results['fine_metrics']['macro_f1']:.4f}")
 
         # Show misclassification summary
-        if val_results.get('misclassification_summary'):
-            summary = val_results['misclassification_summary']
+        summary = val_results.get('misclassification_summary')
+        if summary:
             print(f"\n[Misclassification]")
             print(f"  Gate errors: {summary['gate_total_errors']} "
                   f"(漏检: {summary['gate_errors_by_type']['defect_as_nuisance']}, "
                   f"误报: {summary['gate_errors_by_type']['nuisance_as_defect']})")
             print(f"  Fine errors: {summary['fine_total_errors']}")
 
+        # Record history
+        epoch_record = {
+            'epoch': epoch,
+            'train_loss': train_results['train_loss'],
+            'val_loss': val_results['val_loss'],
+            'gate_accuracy': train_results['gate_metrics']['accuracy'],
+            'gate_defect_recall': train_results['gate_metrics']['defect_recall'],
+            'fine_accuracy': train_results['fine_metrics']['accuracy'],
+            'fine_macro_f1': train_results['fine_metrics']['macro_f1'],
+            'gate_errors': summary['gate_total_errors'] if summary else 0,
+            'fine_errors': summary['fine_total_errors'] if summary else 0,
+        }
+        history.append(epoch_record)
+
         # Save best model
         if val_results['val_loss'] < best_val_loss:
             best_val_loss = val_results['val_loss']
-            print(f"\nNew best model! Loss: {best_val_loss:.4f}")
+            best_epoch = epoch
+            ckpt_path = os.path.join(args.output_dir, "best_model.pt")
+            trainer.save_checkpoint(ckpt_path, epoch, extra={'history': history})
+            print(f"\nNew best model! Loss: {best_val_loss:.4f} → saved to {ckpt_path}")
+
+    # Save last checkpoint
+    last_ckpt_path = os.path.join(args.output_dir, "last_model.pt")
+    trainer.save_checkpoint(last_ckpt_path, args.epochs)
+    print(f"\nLast model saved to {last_ckpt_path}")
+    print(f"Best epoch: {best_epoch} (val_loss={best_val_loss:.4f})")
+
+    # Build RAD memory bank after training (RAD mode only)
+    if model.use_rad_anomaly:
+        print("\n" + "=" * 60)
+        print("Building RAD Memory Bank")
+        print("=" * 60)
+        # Filter training loader to defect samples only for bank building
+        # We use the full training loader since RADAnomalyHead checks defect_type internally
+        bank_path = os.path.join(args.output_dir, "rad_bank.pth")
+        model.build_rad_bank(train_loader, device=args.device, save_path=bank_path)
 
     # Calibrate anomaly threshold after training
     if hasattr(model, 'calibrate_anomaly_threshold'):
@@ -207,10 +264,35 @@ def main():
     print("Training complete!")
     print("=" * 60)
 
-    # Inference example
-    print("\n" + "=" * 60)
-    print("Inference Example")
-    print("=" * 60)
+    # Reload best model and run final validation for report
+    best_ckpt_path = os.path.join(args.output_dir, "best_model.pt")
+    if os.path.exists(best_ckpt_path):
+        trainer.load_checkpoint(best_ckpt_path)
+        print(f"\nLoaded best model (epoch {best_epoch}) for final report...")
+        final_val = trainer.validate(val_loader, save_errors=True)
+    else:
+        final_val = val_results  # fallback to last epoch
+
+    # Generate markdown report
+    dataset_info = {
+        'total': (len(train_loader.dataset) + len(val_loader.dataset)
+                  if hasattr(train_loader.dataset, '__len__') else 0),
+        'train': len(train_loader.dataset) if hasattr(train_loader.dataset, '__len__') else 0,
+        'val': len(val_loader.dataset) if hasattr(val_loader.dataset, '__len__') else 0,
+        'num_classes': num_defect_classes + 1,
+        'defect_classes': num_defect_classes,
+    }
+    report_path = generate_markdown_report(
+        val_results=final_val,
+        history=history,
+        class_names=(
+            real_dataset.get_class_names() if real_dataset else
+            list(range(num_defect_classes + 1))
+        ),
+        dataset_info=dataset_info,
+        output_dir=args.output_dir,
+        prefix="validation_report"
+    )
 
     model.eval()
     with torch.no_grad():

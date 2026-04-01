@@ -110,6 +110,33 @@ class DINOv3Backbone(nn.Module):
 
         return feat
 
+    def get_intermediate_layers(
+        self,
+        x: torch.Tensor,
+        n: int = 1,
+        return_class_token: bool = True,
+        norm: bool = True
+    ):
+        """
+        Extract intermediate layer features for RAD anomaly detection.
+
+        Args:
+            x: [B, C, H, W] input images
+            n: int or list — layer indices (0-based) to extract
+            return_class_token: whether to return CLS token
+            norm: whether to normalize features
+
+        Returns:
+            list of (patch_tokens, class_token) tuples per layer.
+            patch_tokens: [B, L, D]  (L = num patches)
+            class_token: [B, D]
+        """
+        return self.model.get_intermediate_layers(
+            x, n=n, reshape=False,
+            return_class_token=return_class_token,
+            norm=norm
+        )
+
     def get_output_dim(self) -> int:
         """Return the feature dimension."""
         return self.embed_dim

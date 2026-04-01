@@ -22,7 +22,10 @@ class WaferDefectModel(nn.Module):
     - Fine head (defect type classification)
     - Anomaly head (unknown defect detection)
 
-    Unknown defect detection:
+    Unknown defect detection supports two modes:
+      - AnomalyHead: distance-to-class-center based (default)
+      - RADAnomalyHead: multi-layer patch-KNN based (RAD method)
+
     When a sample is classified as Defect by Gate but is far from all known
     defect class centers (high anomaly score), it's marked as "unknown defect".
     """
@@ -39,13 +42,19 @@ class WaferDefectModel(nn.Module):
         fusion_type: str = "attention",
         freeze_backbone: bool = False,
         use_anomaly_head: bool = True,
-        use_uncertainty: bool = True
+        use_uncertainty: bool = True,
+        # RAD-specific options
+        use_rad_anomaly: bool = False,
+        rad_layer_indices: list = None,
+        rad_k_image: int = 5,
+        rad_bank_path: str = None,
     ):
         super().__init__()
 
         self.num_defect_classes = num_defect_classes
         self.use_anomaly_head = use_anomaly_head
         self.use_uncertainty = use_uncertainty
+        self.use_rad_anomaly = use_rad_anomaly
         self.backbone = DINOv3Backbone(
             model_name=backbone_name,
             pretrained_path=pretrained_path,
@@ -66,7 +75,7 @@ class WaferDefectModel(nn.Module):
             defect_weight=defect_weight
         )
 
-        # Fine head (defect type classification)
+        # Fine head (defect classification)
         self.fine = FineHead(
             feat_dim=embed_dim,
             num_classes=num_defect_classes,
@@ -79,10 +88,19 @@ class WaferDefectModel(nn.Module):
 
         # Anomaly head
         if use_anomaly_head:
-            self.anomaly = AnomalyHead(
-                feat_dim=embed_dim,
-                num_classes=num_defect_classes
-            )
+            if use_rad_anomaly:
+                from .rad_head import RADAnomalyHead
+                self.anomaly = RADAnomalyHead(
+                    backbone=self.backbone,
+                    layer_indices=rad_layer_indices or [3, 6, 9, 11],
+                    k_image=rad_k_image,
+                    bank_path=rad_bank_path,
+                )
+            else:
+                self.anomaly = AnomalyHead(
+                    feat_dim=embed_dim,
+                    num_classes=num_defect_classes
+                )
 
     def forward(
         self,
@@ -138,20 +156,29 @@ class WaferDefectModel(nn.Module):
         anomaly_score = None
         is_unknown_defect = None
         if self.use_anomaly_head:
-            anomaly_out = self.anomaly(fused_feat)
-            anomaly_score = anomaly_out["anomaly_score"]
-
-            # Use z-score based threshold (2.0 = more than 2 std from mean)
-            # This is more interpretable than raw anomaly scores
-            is_defect_mask = gate_out["is_defect_pred"] == 1
-            is_unknown_defect = torch.zeros(B, dtype=torch.long, device=images.device)
-
-            # Only apply threshold if statistics are meaningful
-            dist_std = self.anomaly.dist_std.item()
-            if dist_std > 1e-6:
-                is_unknown_defect[is_defect_mask] = (
-                    anomaly_score[is_defect_mask] > 2.0  # z-score threshold
-                ).long()
+            if self.use_rad_anomaly:
+                # RAD: only run if bank has been built
+                if not getattr(self.anomaly, '_banks_built', False):
+                    anomaly_score = None
+                    is_unknown_defect = None
+                else:
+                    anomaly_out = self.anomaly(images)
+                    anomaly_score = anomaly_out["anomaly_score"]
+                    is_defect_mask = gate_out["is_defect_pred"] == 1
+                    is_unknown_defect = torch.zeros(B, dtype=torch.long, device=images.device)
+                    if is_defect_mask.sum() > 0:
+                        is_unknown_defect[is_defect_mask] = anomaly_out["is_unknown_defect"][is_defect_mask]
+            else:
+                # Original class-center based
+                anomaly_out = self.anomaly(fused_feat)
+                anomaly_score = anomaly_out["anomaly_score"]
+                is_defect_mask = gate_out["is_defect_pred"] == 1
+                is_unknown_defect = torch.zeros(B, dtype=torch.long, device=images.device)
+                dist_std = self.anomaly.dist_std.item()
+                if dist_std > 1e-6:
+                    is_unknown_defect[is_defect_mask] = (
+                        anomaly_score[is_defect_mask] > 2.0
+                    ).long()
 
         result = {
             "gate_logits": gate_out["logits"],
@@ -175,9 +202,27 @@ class WaferDefectModel(nn.Module):
         return result
 
     def update_anomaly_centers(self, feats: torch.Tensor, labels: torch.Tensor):
-        """Update class centers for anomaly detection."""
-        if self.use_anomaly_head:
+        """Update class centers for anomaly detection (non-RAD mode)."""
+        if self.use_anomaly_head and not self.use_rad_anomaly:
             self.anomaly.update_centers(feats, labels)
+
+    def build_rad_bank(
+        self,
+        dataloader,
+        device: str = "cuda",
+        save_path: str = None
+    ):
+        """
+        Build RAD memory bank from training defect samples.
+
+        Args:
+            dataloader: DataLoader with training samples
+            device: device
+            save_path: optional path to save bank .pth
+        """
+        if not self.use_rad_anomaly:
+            raise RuntimeError("RAD anomaly not enabled. Set use_rad_anomaly=True.")
+        self.anomaly.build_bank(dataloader, device=device, save_path=save_path)
 
     def calibrate_anomaly_threshold(
         self,
@@ -186,8 +231,7 @@ class WaferDefectModel(nn.Module):
         percentile: float = 95
     ):
         """
-        Final calibration of anomaly detection statistics from full training set.
-        Updates normalization statistics using all known defect samples.
+        Calibrate anomaly detection threshold from full training set.
 
         Args:
             train_loader: DataLoader with training samples
@@ -198,34 +242,35 @@ class WaferDefectModel(nn.Module):
             return
 
         self.eval()
+        if self.use_rad_anomaly:
+            print(f"[RAD Anomaly] Calibrating threshold (percentile={percentile})...")
+            return self.anomaly.calibrate(train_loader, device=device, percentile=percentile)
+
+        # Original class-center based
         all_feats = []
-        defect_mask = []
+        defect_mask_list = []
 
         with torch.no_grad():
             for batch in train_loader:
                 images = batch["images"].to(device)
                 is_defect = batch["is_defect"].to(device)
-
                 outputs = self.forward(images, return_features=True)
                 all_feats.append(outputs["feat"].cpu())
-                defect_mask.append((is_defect == 1).cpu())
+                defect_mask_list.append((is_defect == 1).cpu())
 
         all_feats = torch.cat(all_feats, dim=0)
-        defect_mask = torch.cat(defect_mask, dim=0)
+        defect_mask = torch.cat(defect_mask_list, dim=0)
 
         if defect_mask.sum() > 0:
-            # Update statistics from all training defects
             self.anomaly.update_statistics(all_feats, defect_mask)
-
-            # Calculate reference threshold
             outputs = self.anomaly(all_feats[defect_mask])
             dists = outputs["anomaly_score"].cpu().numpy()
             threshold = np.percentile(dists, percentile)
-
             print(f"[Anomaly Detection] Final calibration:")
             print(f"  Known defect anomaly scores: mean={dists.mean():.4f}, std={dists.std():.4f}")
             print(f"  Threshold (percentile={percentile}): {threshold:.4f}")
             print(f"  → Samples with score > {threshold:.4f} will be flagged as unknown defects")
+            return threshold
 
 
 class WaferDefectModelSimple(nn.Module):
