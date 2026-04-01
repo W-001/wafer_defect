@@ -37,7 +37,7 @@
 ### 2.4 Gate Head (Nuisance vs Defect)
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 二分类主头 | ✅ 已实现 | `GateHead` 输出 2 类 |
+| 二分类主头 | ✅ 已实现 | Updated: 2026-04-01 21:14:15 | `GateHead` 输出 2 类 |
 | 拒识/不确定性头 | ✅ 已实现 | `UncertaintyHead` |
 | 阈值可调 risk-aware decision | ✅ 已实现 | `defect_weight` 参数可调 |
 
@@ -193,3 +193,4 @@ data/
 | 2026-03-22 18:53 | feat: initial wafer_defect project | 全部模块 |
 | 2026-03-25 | feat: add real data loading, unknown defect detection, misclassification tracking | 数据加载、异常检测、错分追踪 |
 [2026-03-25 10:02:57] Completed via commit: feat(feat: add real data loading, unknown defect detection, and misclassification tracking): add real data loading, unknown defect detection, and misclassification tracking
+[2026-04-01 20:50:04] Completed via commit: feat(feat: integrate RAD multi-layer patch-KNN anomaly detection + bug fixes): integrate RAD multi-layer patch-KNN anomaly detection + bug fixes

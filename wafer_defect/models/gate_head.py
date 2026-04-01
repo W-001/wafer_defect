@@ -48,7 +48,7 @@ class GateHead(nn.Module):
         prob = F.softmax(logits, dim=-1)
 
         # is_defect_pred = 1 means True Defect, 0 means Nuisance
-        is_defect_pred = prob[:, 1] > 0.5
+        is_defect_pred = (prob[:, 1] > 0.5).long()
 
         return {
             "logits": logits,
