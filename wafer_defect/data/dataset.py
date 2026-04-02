@@ -89,7 +89,11 @@ class RealWaferDataset(Dataset):
         """扫描根目录下的所有类别文件夹"""
         class_dirs = [d for d in self.root_dir.iterdir()
                       if d.is_dir() and not d.name.startswith('.')]
-        class_dirs.sort(key=lambda x: x.name)
+        # Do NOT sort alphabetically — label assignment must follow filesystem order
+        # so that the user's folder arrangement determines the label sequence.
+        # The nuisance_name check ensures Nuisance is always label=0 regardless of
+        # its position in the list; defect folders get labels 1,2,3... in iteration order.
+        # For deterministic ordering, pass an explicit label_map.
 
         if label_map is None:
             self.label_map = {}
@@ -361,6 +365,22 @@ class WaferDefectDataset(Dataset):
         self.transform = transform
         self.crop_footer = crop_footer
         self.footer_pixels = footer_pixels
+        self._build_class_info()
+
+    def _build_class_info(self):
+        """Infer class_info from the samples (same layout as RealWaferDataset)."""
+        label_ids = sorted({s.label for s in self.samples})
+        self.class_info = {}
+        for lid in label_ids:
+            if lid == 0:
+                name = "Nuisance"
+            else:
+                name = f"Defect_{lid}"
+            self.class_info[lid] = {"name": name, "is_defect": 0 if lid == 0 else 1}
+
+    def get_class_names(self) -> List[str]:
+        """Return class names in label order (index = label id, matches RealWaferDataset)."""
+        return [self.class_info[i]["name"] for i in sorted(self.class_info.keys())]
 
     def __len__(self) -> int:
         return len(self.samples)

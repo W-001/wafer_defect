@@ -16,7 +16,7 @@
 ### 2.1 输入预处理层
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 主图区域 + 底部刻度区域分离 | ✅ 已实现 | Updated: 2026-04-02 09:58:03 | Updated: 2026-03-25 10:02:56 | `RealWaferDataset` 默认裁剪底部40px |
+| 主图区域 + 底部刻度区域分离 | ✅ 已实现 | Updated: 2026-04-02 10:35:01 | Updated: 2026-04-02 09:58:03 | Updated: 2026-03-25 10:02:56 | `RealWaferDataset` 默认裁剪底部40px |
 | 底部区域单独处理 | ⚠️ 部分 | 当前仅做裁剪，未做 OCR/数值解析 |
 | 可变尺寸图片resize | ✅ 已实现 | 504-680px → 统一224x224 |
 
@@ -196,3 +196,4 @@ data/
 [2026-04-01 20:50:04] Completed via commit: feat(feat: integrate RAD multi-layer patch-KNN anomaly detection + bug fixes): integrate RAD multi-layer patch-KNN anomaly detection + bug fixes
 [2026-04-01 21:14:16] Completed via commit: fix(fix: gate_head is_defect_pred returns torch.long for downstream compatibility): gate_head is_defect_pred returns torch.long for downstream compatibility
 [2026-04-02 09:49:29] Completed via commit: fix(fix: prevent NaN losses from MetricLoss zero-positive-pairs and add gradient clipping): prevent NaN losses from MetricLoss zero-positive-pairs and add gradient clipping
+[2026-04-02 09:58:04] Completed via commit: refactor(refactor: replace cv2 with PIL/Pillow for server compatibility): replace cv2 with PIL/Pillow for server compatibility

@@ -126,6 +126,12 @@ def main():
         print(f"Defect classes: {num_defect_classes}")
         print(f"Class names: {real_dataset.get_class_names()}")
 
+    # Derive class_names from whichever dataset is in use
+    # WaferDefectDataset (synthetic) and RealWaferDataset (real) both have get_class_names()
+    _ds = real_dataset if real_dataset else train_loader.dataset
+    class_names = _ds.get_class_names() if hasattr(_ds, 'get_class_names') else None
+    print(f"Class names: {class_names}")
+
     # Create model
     print("\nCreating model...")
     if args.use_dinov3:
@@ -173,7 +179,7 @@ def main():
         metric_weight=args.metric_weight,
         defect_weight=args.defect_weight,
         output_dir=args.output_dir,
-        class_names=real_dataset.get_class_names() if real_dataset else None
+        class_names=class_names
     )
 
     # Training loop
@@ -285,10 +291,7 @@ def main():
     report_path = generate_markdown_report(
         val_results=final_val,
         history=history,
-        class_names=(
-            real_dataset.get_class_names() if real_dataset else
-            list(range(num_defect_classes + 1))
-        ),
+        class_names=class_names,
         dataset_info=dataset_info,
         output_dir=args.output_dir,
         prefix="validation_report"
