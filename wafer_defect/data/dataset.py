@@ -10,7 +10,7 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-import cv2
+from PIL import Image, ImageDraw
 
 
 class WaferDefectSample:
@@ -184,22 +184,19 @@ class RealWaferDataset(Dataset):
 
     def _load_and_preprocess(self, img_path: Path) -> np.ndarray:
         """加载并预处理单张图片"""
-        img = cv2.imread(str(img_path))
-        if img is None:
-            raise ValueError(f"无法读取图片: {img_path}")
-
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = Image.open(str(img_path)).convert('RGB')
 
         # 裁剪底部尺度区域
-        if self.crop_bottom > 0 and img.shape[0] > self.crop_bottom:
-            img = img[:-self.crop_bottom, :]
+        if self.crop_bottom > 0:
+            w, h = img.size
+            if h > self.crop_bottom:
+                img = img.crop((0, 0, w, h - self.crop_bottom))
 
         # resize到统一尺寸
-        img = cv2.resize(img, (self.img_size, self.img_size),
-                         interpolation=cv2.INTER_LINEAR)
+        img = img.resize((self.img_size, self.img_size), Image.BILINEAR)
 
         # 归一化到 [0, 1]
-        img = img.astype(np.float32) / 255.0
+        img = np.array(img, dtype=np.float32) / 255.0
 
         return img
 
@@ -273,37 +270,53 @@ class SyntheticWaferGenerator:
             pass  # Nuisance - clean
         elif defect_type == 1:
             num_scratches = random.randint(1, 3)
+            pil_img = Image.fromarray((img[:main_h] * 255).astype(np.uint8))
+            draw = ImageDraw.Draw(pil_img)
             for _ in range(num_scratches):
-                x1, y1 = random.randint(0, w), random.randint(0, main_h)
-                x2, y2 = random.randint(0, w), random.randint(0, main_h)
-                cv2.line(img[:main_h], (x1, y1), (x2, y2), 1.5, 2)
+                x1, y1 = random.randint(0, w - 1), random.randint(0, main_h - 1)
+                x2, y2 = random.randint(0, w - 1), random.randint(0, main_h - 1)
+                draw.line([(x1, y1), (x2, y2)], fill=round(1.5 * 255), width=2)
+            img[:main_h] = np.array(pil_img, dtype=np.float32) / 255.0
         elif defect_type == 2:
             num_particles = random.randint(5, 15)
+            pil_img = Image.fromarray((img[:main_h] * 255).astype(np.uint8))
+            draw = ImageDraw.Draw(pil_img)
             for _ in range(num_particles):
-                x, y = random.randint(0, w), random.randint(0, main_h)
+                x, y = random.randint(0, w - 1), random.randint(0, main_h - 1)
                 r = random.randint(2, 8)
-                cv2.circle(img[:main_h], (x, y), r, -1)
+                draw.ellipse([x - r, y - r, x + r, y + r], fill=255)
+            img[:main_h] = np.array(pil_img, dtype=np.float32) / 255.0
         elif defect_type == 3:
-            x1, y1 = random.randint(0, w // 2), random.randint(0, main_h)
+            x1, y1 = random.randint(0, w // 2), random.randint(0, main_h - 1)
+            pil_img = Image.fromarray((img[:main_h] * 255).astype(np.uint8))
+            draw = ImageDraw.Draw(pil_img)
             for _ in range(random.randint(5, 15)):
                 dx, dy = random.randint(-10, 10), random.randint(-5, 5)
-                x1 = max(0, min(w, x1 + dx))
-                y1 = max(0, min(main_h, y1 + dy))
-                cv2.circle(img[:main_h], (x1, y1), 1, -1)
+                x1 = max(0, min(w - 1, x1 + dx))
+                y1 = max(0, min(main_h - 1, y1 + dy))
+                draw.point([(x1, y1)], fill=255)
+            img[:main_h] = np.array(pil_img, dtype=np.float32) / 255.0
         else:
             num_spots = random.randint(1, 5)
+            pil_img = Image.fromarray((img[:main_h] * 255).astype(np.uint8))
+            draw = ImageDraw.Draw(pil_img)
             for _ in range(num_spots):
-                x, y = random.randint(0, w), random.randint(0, main_h)
+                x, y = random.randint(0, w - 1), random.randint(0, main_h - 1)
                 r = random.randint(3, 12)
-                cv2.circle(img[:main_h], (x, y), r, 0.8, -1)
+                fill = round(0.8 * 255)
+                draw.ellipse([x - r, y - r, x + r, y + r], fill=fill)
+            img[:main_h] = np.array(pil_img, dtype=np.float32) / 255.0
 
         return img
 
     def add_scale_bar(self, img: np.ndarray) -> np.ndarray:
         """Add scale bar at the bottom."""
         h = img.shape[0]
-        cv2.line(img, (10, h - self.footer_height // 2),
-                 (50, h - self.footer_height // 2), 0.5, 2)
+        pil_img = Image.fromarray((img * 255).astype(np.uint8))
+        draw = ImageDraw.Draw(pil_img)
+        draw.line([(10, h - self.footer_height // 2), (50, h - self.footer_height // 2)],
+                  fill=round(0.5 * 255), width=2)
+        img = np.array(pil_img, dtype=np.float32) / 255.0
         return img
 
     def generate(self, defect_type: int, view_seed: int) -> np.ndarray:
