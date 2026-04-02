@@ -105,18 +105,19 @@ wafer_defect/
 ├── data/dataset.py            # 数据集 + RealWaferDataset
 ├── models/
 │   ├── backbone.py            # DINOv3 backbone 封装
-│   ├── fusion.py             # 三视角融合
-│   ├── gate_head.py          # Nuisance vs Defect
-│   ├── fine_head.py          # Defect细分类
-│   ├── anomaly_head.py       # 类中心距离异常检测
-│   ├── rad_head.py           # RAD 多层 Patch-KNN 异常检测
-│   └── full_model.py         # 完整模型
-├── losses/__init__.py        # 损失函数
-├── engine/trainer.py         # 训练引擎 + 错分追踪 + Markdown报告
+│   ├── fusion.py              # 三视角融合
+│   ├── gate_head.py           # Nuisance vs Defect
+│   ├── fine_head.py           # Defect细分类
+│   ├── anomaly_head.py         # 类中心距离异常检测
+│   ├── rad_head.py            # RAD 多层 Patch-KNN 异常检测
+│   └── full_model.py          # 完整模型
+├── losses/__init__.py         # 损失函数
+├── engine/trainer.py          # 训练引擎 + 错分追踪 + Markdown报告
 ├── utils/
-│   ├── metrics.py            # 评估指标
-│   └── data_inspector.py    # 数据集检查工具
-└── train.py                  # 主训练脚本
+│   ├── metrics.py              # 评估指标
+│   └── data_inspector.py      # 数据集检查工具
+├── train.py                   # 主训练脚本
+└── demo_inference.py          # 推理 Demo（热力图可视化）
 ```
 
 ---
@@ -149,6 +150,23 @@ PYTHONPATH=. python wafer_defect/train.py --synthetic --epochs 10
 
 ```shell
 PYTHONPATH=. python wafer_defect/utils/data_inspector.py /path/to/wafer_data
+```
+
+### 推理热力图 Demo
+
+```shell
+# 合成数据快速测试
+PYTHONPATH=. python wafer_defect/demo_inference.py \
+    --synthetic --num_samples 20 --num_defect_classes 3 \
+    --output_dir output/demo
+
+# 真实数据 + RAD 热力图
+PYTHONPATH=. python wafer_defect/demo_inference.py \
+    --checkpoint output/best_model.pt \
+    --rad_bank output/rad_bank.pth \
+    --data_dir /path/to/wafer_data \
+    --use_dinov3 --use_rad_anomaly \
+    --output_dir output/demo
 ```
 
 ### 数据格式
@@ -198,3 +216,4 @@ data/
 [2026-04-02 09:49:29] Completed via commit: fix(fix: prevent NaN losses from MetricLoss zero-positive-pairs and add gradient clipping): prevent NaN losses from MetricLoss zero-positive-pairs and add gradient clipping
 [2026-04-02 09:58:04] Completed via commit: refactor(refactor: replace cv2 with PIL/Pillow for server compatibility): replace cv2 with PIL/Pillow for server compatibility
 [2026-04-02 10:35:01] Completed via commit: fix(fix: resolve two label mismatch bugs in validation report): resolve two label mismatch bugs in validation report
+[2026-04-02 10:54:47] Completed via commit: feat(feat: add anomaly heatmap demo inference script): add anomaly heatmap demo inference script
