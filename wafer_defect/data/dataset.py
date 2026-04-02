@@ -89,11 +89,10 @@ class RealWaferDataset(Dataset):
         """扫描根目录下的所有类别文件夹"""
         class_dirs = [d for d in self.root_dir.iterdir()
                       if d.is_dir() and not d.name.startswith('.')]
-        # Do NOT sort alphabetically — label assignment must follow filesystem order
-        # so that the user's folder arrangement determines the label sequence.
-        # The nuisance_name check ensures Nuisance is always label=0 regardless of
-        # its position in the list; defect folders get labels 1,2,3... in iteration order.
-        # For deterministic ordering, pass an explicit label_map.
+        # Sort alphabetically so label assignment is deterministic and reproducible
+        # across different systems / filesystem ordering.
+        # nuisance_name always gets label=0; defect folders get 1,2,3... alphabetically.
+        class_dirs.sort(key=lambda x: x.name)
 
         if label_map is None:
             self.label_map = {}
@@ -116,11 +115,19 @@ class RealWaferDataset(Dataset):
                 'is_defect': is_defect
             }
 
+        # Diagnostic: print the actual label assignment so users can verify
+        print(f"[RealWaferDataset] Label assignment:")
+        for label_id, info in sorted(self.class_info.items()):
+            tag = " (Nuisance)" if info['is_defect'] == 0 else ""
+            print(f"  label={label_id} → {info['name']}{tag}")
+
     def _scan_three_views(self):
         """扫描每个类别的图片，识别三视角组合"""
-        for class_dir in self.root_dir.iterdir():
-            if not class_dir.is_dir():
-                continue
+        class_dirs = sorted(
+            (d for d in self.root_dir.iterdir() if d.is_dir()),
+            key=lambda x: x.name
+        )
+        for class_dir in class_dirs:
             if class_dir.name not in self.label_map:
                 continue
 
