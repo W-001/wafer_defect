@@ -197,3 +197,4 @@ data/
 [2026-04-01 21:14:16] Completed via commit: fix(fix: gate_head is_defect_pred returns torch.long for downstream compatibility): gate_head is_defect_pred returns torch.long for downstream compatibility
 [2026-04-02 09:49:29] Completed via commit: fix(fix: prevent NaN losses from MetricLoss zero-positive-pairs and add gradient clipping): prevent NaN losses from MetricLoss zero-positive-pairs and add gradient clipping
 [2026-04-02 09:58:04] Completed via commit: refactor(refactor: replace cv2 with PIL/Pillow for server compatibility): replace cv2 with PIL/Pillow for server compatibility
+[2026-04-02 10:35:01] Completed via commit: fix(fix: resolve two label mismatch bugs in validation report): resolve two label mismatch bugs in validation report
