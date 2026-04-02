@@ -194,3 +194,4 @@ data/
 | 2026-03-25 | feat: add real data loading, unknown defect detection, misclassification tracking | 数据加载、异常检测、错分追踪 |
 [2026-03-25 10:02:57] Completed via commit: feat(feat: add real data loading, unknown defect detection, and misclassification tracking): add real data loading, unknown defect detection, and misclassification tracking
 [2026-04-01 20:50:04] Completed via commit: feat(feat: integrate RAD multi-layer patch-KNN anomaly detection + bug fixes): integrate RAD multi-layer patch-KNN anomaly detection + bug fixes
+[2026-04-01 21:14:16] Completed via commit: fix(fix: gate_head is_defect_pred returns torch.long for downstream compatibility): gate_head is_defect_pred returns torch.long for downstream compatibility

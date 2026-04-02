@@ -643,6 +643,8 @@ class WaferDefectTrainer:
             # Backward
             self.optimizer.zero_grad()
             loss.backward()
+            # Clip gradients to prevent explosion (common with DINOv3 backbone)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
             # Metrics

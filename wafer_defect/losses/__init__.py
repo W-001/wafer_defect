@@ -117,6 +117,9 @@ class MetricLoss(nn.Module):
 
         # Mean of log-likelihood over positive pairs
         num_pos = same_label.sum(dim=1)
+        # Guard: if no positive pairs exist in a batch, return 0 instead of NaN
+        if num_pos.sum() == 0:
+            return torch.tensor(0.0, device=features.device, dtype=features.dtype)
         loss = -(same_label * log_prob).sum(dim=1) / (num_pos + 1e-8)
 
         return loss.mean()
