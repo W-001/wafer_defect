@@ -67,3 +67,17 @@ Thumbs.db
 
 # dinov3 submodule (单独管理)
 dinov3/
+
+# Test data and outputs
+output/
+dinomaly_tmp/
+testdata/
+test_project.py
+test_load_dataset.py
+verify_*.py
+findings.md
+progress.md
+task_plan.md
+organize_testdata.py
+nul
+.claude/

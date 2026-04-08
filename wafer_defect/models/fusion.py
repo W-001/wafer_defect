@@ -1,5 +1,5 @@
 """
-Multi-view fusion module for 3-view wafer defect samples.
+Multi-view fusion module — supports single-view passthrough and 3-view fusion.
 """
 
 import torch
@@ -11,24 +11,27 @@ class MultiViewFusion(nn.Module):
     """
     Fuse features from 3 views of the same defect sample.
 
-    Supports:
-    - Mean pooling
-    - Attention-weighted pooling
-    - Gating mechanism
+    When use_three_views=False, acts as a pass-through (single-view mode).
+    When use_three_views=True, supports:
+      - Mean pooling
+      - Attention-weighted pooling
+      - Gating mechanism
     """
 
-    def __init__(self, feat_dim: int, fusion_type: str = "attention"):
+    def __init__(self, feat_dim: int, fusion_type: str = "attention",
+                 use_three_views: bool = False):
         super().__init__()
         self.feat_dim = feat_dim
         self.fusion_type = fusion_type
+        self.use_three_views = use_three_views
 
-        if fusion_type == "attention":
+        if use_three_views and fusion_type == "attention":
             self.attention = nn.Sequential(
                 nn.Linear(feat_dim, feat_dim // 4),
                 nn.ReLU(inplace=True),
                 nn.Linear(feat_dim // 4, 1)
             )
-        elif fusion_type == "gated":
+        elif use_three_views and fusion_type == "gated":
             self.gate = nn.Sequential(
                 nn.Linear(feat_dim * 3, feat_dim),
                 nn.Sigmoid()
@@ -41,10 +44,19 @@ class MultiViewFusion(nn.Module):
     def forward(self, feats: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            feats: [B, 3, D] features from 3 views
+            feats: [B, 3, D] features from 3 views (3-view mode)
+                  or [B, D] features (single-view mode, use_three_views=False)
         Returns:
             fused: [B, D] fused features
         """
+        # Single-view mode: pass through directly
+        if not self.use_three_views:
+            # Accept both [B, D] and [B, 1, D] shapes
+            if feats.dim() == 3:
+                return feats.squeeze(1)
+            return feats
+
+        # ── 3-view fusion ────────────────────────────────────────────────────
         if self.fusion_type == "mean":
             return feats.mean(dim=1)
 

@@ -1,6 +1,15 @@
 """
 Training engine for wafer defect classification.
-Includes misclassification tracking and markdown report generation.
+
+Includes:
+- WaferDefectTrainer: Base trainer with misclassification tracking
+- ThreePhaseTrainer: Three-phase training (classification -> Dinomaly2 -> joint)
+- generate_markdown_report: Markdown report generation
+
+Three-Phase Training:
+    Phase 1 (classification): Train Gate + Fine heads
+    Phase 2 (dinomaly2): Train Dinomaly2 decoder
+    Phase 3 (joint): Joint fine-tuning (optional)
 """
 
 import os
@@ -11,9 +20,16 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from collections import defaultdict
 from datetime import datetime
+from typing import Optional, Dict, Any, List, Union
 
 from ..losses import CombinedLoss
 from ..utils.metrics import GateMetrics, FineMetrics
+
+
+# Training phases
+PHASE_CLASSIFICATION = "classification"
+PHASE_DINOMALITY2 = "dinomaly2"
+PHASE_JOINT = "joint"
 
 
 def _ascii_bar_chart(values: list, keys: list = None, width: int = 40,
@@ -70,27 +86,24 @@ class MisclassificationTracker:
         self.num_classes = num_classes
 
         # Gate errors (Nuisance vs Defect confusion)
-        self.gate_errors = []  # {'path': str, 'true': int, 'pred': int, 'prob': float}
+        self.gate_errors = []
 
         # Fine errors (Defect type confusion)
-        self.fine_errors = []  # {'path': str, 'true': int, 'pred': int, 'probs': list}
+        self.fine_errors = []
 
         # Confusion tracking
-        self.gate_confusion = defaultdict(int)  # (true, pred) -> count
-        self.fine_confusion = defaultdict(int)  # (true, pred) -> count
+        self.gate_confusion = defaultdict(int)
+        self.fine_confusion = defaultdict(int)
 
         # Per-class error counts
         self.gate_per_class_errors = defaultdict(int)
         self.fine_per_class_errors = defaultdict(int)
 
-        # class_names may come as a list (from get_class_names) or dict
-        # Normalize to dict: list index = label id
         if class_names is None:
             self.class_names = {}
         elif isinstance(class_names, dict):
             self.class_names = class_names
         else:
-            # Assume list/tuple, index = label id
             self.class_names = {i: str(name) for i, name in enumerate(class_names)}
 
     def add_gate_error(self, path: str, true_label: int, pred_label: int,
@@ -129,9 +142,9 @@ class MisclassificationTracker:
     def _get_gate_error_type(self, true_label, pred_label):
         """Get human-readable error type."""
         if true_label == 0 and pred_label != 0:
-            return "defect_as_nuisance"  # 把缺陷误认为正常（漏检）
+            return "defect_as_nuisance"
         elif true_label != 0 and pred_label == 0:
-            return "nuisance_as_defect"  # 把正常误认为缺陷（误报）
+            return "nuisance_as_defect"
         else:
             return "other"
 
@@ -144,8 +157,8 @@ class MisclassificationTracker:
                 'defect_as_nuisance': sum(1 for e in self.gate_errors if e['error_type'] == 'defect_as_nuisance'),
                 'nuisance_as_defect': sum(1 for e in self.gate_errors if e['error_type'] == 'nuisance_as_defect')
             },
-            'gate_errors': self.gate_errors,  # full error list for report
-            'fine_errors': self.fine_errors,  # full error list for report
+            'gate_errors': self.gate_errors,
+            'fine_errors': self.fine_errors,
             'top_gate_confusion': sorted(
                 [{'true': k[0], 'pred': k[1], 'count': v} for k, v in self.gate_confusion.items()],
                 key=lambda x: -x['count']
@@ -164,17 +177,14 @@ class MisclassificationTracker:
         """Save detailed misclassification report."""
         os.makedirs(output_dir, exist_ok=True)
 
-        # Summary
         summary = self.get_summary()
         with open(os.path.join(output_dir, f"{prefix}_summary.json"), 'w', encoding='utf-8') as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
 
-        # Gate errors
         if self.gate_errors:
-            # 按错误类型分组
             gate_report = {
-                'defect_as_nuisance': [],  # 漏检：把缺陷误认为正常
-                'nuisance_as_defect': [],   # 误报：把正常误认为缺陷
+                'defect_as_nuisance': [],
+                'nuisance_as_defect': [],
                 'other': []
             }
             for e in self.gate_errors:
@@ -183,9 +193,7 @@ class MisclassificationTracker:
             with open(os.path.join(output_dir, f"{prefix}_gate_errors.json"), 'w', encoding='utf-8') as f:
                 json.dump(gate_report, f, ensure_ascii=False, indent=2)
 
-        # Fine errors
         if self.fine_errors:
-            # 按真实类别分组
             fine_by_true = defaultdict(list)
             for e in self.fine_errors:
                 fine_by_true[e['true_name']].append(e)
@@ -197,7 +205,7 @@ class MisclassificationTracker:
             with open(os.path.join(output_dir, f"{prefix}_fine_errors.json"), 'w', encoding='utf-8') as f:
                 json.dump(fine_report, f, ensure_ascii=False, indent=2)
 
-        # CSV for easy inspection
+        # CSV exports
         if self.gate_errors:
             import csv
             with open(os.path.join(output_dir, f"{prefix}_gate_errors.csv"), 'w', newline='', encoding='utf-8') as f:
@@ -241,24 +249,11 @@ def generate_markdown_report(
     prefix: str = "validation_report"
 ) -> str:
     """
-    Generate a comprehensive markdown validation report with ASCII charts
-   , confusion matrices, and error analysis.
-
-    Args:
-        val_results: output from WaferDefectTrainer.validate()
-        history: list of epoch records from training loop
-        class_names: label -> class name mapping (dict or list)
-        dataset_info: {'total': int, 'train': int, 'val': int, 'num_classes': int}
-        output_dir: where to save the report
-        prefix: filename prefix
-
-    Returns:
-        Path to the saved markdown file
+    Generate a comprehensive markdown validation report.
     """
     os.makedirs(output_dir, exist_ok=True)
     report_path = os.path.join(output_dir, f"{prefix}.md")
 
-    # Normalize class_names to dict
     if class_names is None:
         class_names = {}
     elif not isinstance(class_names, dict):
@@ -269,17 +264,16 @@ def generate_markdown_report(
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ── 1. Header ──────────────────────────────────────────────────────────────
     md = []
-    md.append(f"# 🔬 Wafer Defect Classification — Validation Report")
+    md.append(f"# Wafer Defect Classification - Validation Report")
     md.append(f"")
-    md.append(f"> Generated: `{now}`  ·  Engine: `WaferDefectTrainer`")
+    md.append(f"> Generated: `{now}`  - Engine: `WaferDefectTrainer`")
     md.append(f"")
 
-    # ── 2. Dataset Info ────────────────────────────────────────────────────────
-    md.append(f"## 1. Dataset Overview")
-    md.append(f"")
+    # Dataset Info
     if dataset_info:
+        md.append(f"## 1. Dataset Overview")
+        md.append(f"")
         md.append(f"| Item | Value |")
         md.append(f"|------|-------|")
         md.append(f"| Total samples | {dataset_info.get('total', 'N/A')} |")
@@ -288,57 +282,25 @@ def generate_markdown_report(
         md.append(f"| Number of classes | {dataset_info.get('num_classes', 'N/A')} |")
         md.append(f"| Defect classes | {dataset_info.get('defect_classes', 'N/A')} |")
         md.append(f"")
-    md.append(f"**Class Label Mapping:**")
-    for lid, lname in sorted(class_names.items()):
-        md.append(f"  - `{lid}` → *{lname}*")
-    md.append(f"")
 
-    # ── 3. Gate Metrics (Nuisance vs Defect) ─────────────────────────────────
+    # Gate Metrics
     gate = val_results.get('gate_metrics', {})
-    md.append(f"## 2. Gate Head — Nuisance vs Defect")
+    md.append(f"## 2. Gate Head - Nuisance vs Defect")
     md.append(f"")
     md.append(f"| Metric | Value |")
     md.append(f"|--------|-------|")
     md.append(f"| **Accuracy** | `{gate.get('accuracy', 0):.4f}` |")
     md.append(f"| Nuisance Recall | `{gate.get('nuisance_recall', 0):.4f}` |")
     md.append(f"| **Defect Recall** | `{gate.get('defect_recall', 0):.4f}` |")
-    md.append(f"| Nuisance→Defect Rate (误报) | `{gate.get('nuisance_as_defect_rate', 0):.4f}` |")
-    md.append(f"| **Defect→Nuisance Rate (漏检)** | `{gate.get('defect_as_nuisance_rate', 0):.4f}` |")
+    md.append(f"| Nuisance->Defect Rate (FP) | `{gate.get('nuisance_as_defect_rate', 0):.4f}` |")
+    md.append(f"| **Defect->Nuisance Rate (FN)** | `{gate.get('defect_as_nuisance_rate', 0):.4f}` |")
     if gate.get('auc') is not None:
         md.append(f"| AUC | `{gate.get('auc', 0):.4f}` |")
     md.append(f"")
 
-    cm_gate = gate.get('confusion_matrix', [])
-    if cm_gate:
-        gate_labels = [name_of(0, "Nuisance"), name_of(1, "Defect")]
-        md.append(f"### Confusion Matrix")
-        md.append(f"")
-        md.append(f"```")
-        md.append(f"Nuisance vs Defect Confusion Matrix (rows=true, cols=pred)")
-        md.append(f"")
-        md.append(_ascii_confusion_matrix(cm_gate, labels=gate_labels))
-        md.append(f"```")
-        md.append(f"")
-        md.append(f"| | Pred Nuisance | Pred Defect |")
-        md.append(f"|---|---|---|")
-        md.append(f"| **True Nuisance** | {cm_gate[0][0]} (TN) | {cm_gate[0][1]} (FP) |")
-        md.append(f"| **True Defect** | {cm_gate[1][0]} (FN) | {cm_gate[1][1]} (TP) |")
-        md.append(f"")
-
-    # Gate score bar
-    gate_acc = gate.get('accuracy', 0)
-    defect_recall = gate.get('defect_recall', 0)
-    md.append(f"### Score Card")
-    md.append(f"")
-    md.append(f"```")
-    md.append(f"Gate Accuracy          {''.join('█' if i < int(gate_acc*20) else '░' for i in range(20))} {gate_acc:.1%}")
-    md.append(f"Defect Recall           {''.join('█' if i < int(defect_recall*20) else '░' for i in range(20))} {defect_recall:.1%}")
-    md.append(f"```")
-    md.append(f"")
-
-    # ── 4. Fine Head (Defect Type) ────────────────────────────────────────────
+    # Fine Metrics
     fine = val_results.get('fine_metrics', {})
-    md.append(f"## 3. Fine Head — Defect Type Classification")
+    md.append(f"## 3. Fine Head - Defect Type Classification")
     md.append(f"")
     md.append(f"| Metric | Value |")
     md.append(f"|--------|-------|")
@@ -361,202 +323,66 @@ def generate_markdown_report(
             md.append(f"| *{name_of(i+1, f'class_{i+1}')}* | {p:.4f} | {r:.4f} | {f:.4f} |")
         md.append(f"")
 
-    # Classification report
-    report_str = fine.get('classification_report', '')
-    if report_str:
-        md.append(f"### sklearn Classification Report")
-        md.append(f"")
-        md.append(f"```")
-        md.append(report_str.rstrip())
-        md.append(f"```")
-        md.append(f"")
-
-    # ── 5. Misclassification Analysis ─────────────────────────────────────────
+    # Misclassification Analysis
     summary = val_results.get('misclassification_summary')
     if summary:
         md.append(f"## 4. Misclassification Analysis")
         md.append(f"")
-
         ge = summary['gate_errors_by_type']
         fe_count = summary['fine_total_errors']
-        md.append(f"**Gate Errors:** {summary['gate_total_errors']} total  ")
-        md.append(f"  - 漏检 (Defect→Nuisance): {ge['defect_as_nuisance']}  ")
-        md.append(f"  - 误报 (Nuisance→Defect): {ge['nuisance_as_defect']}")
+        md.append(f"**Gate Errors:** {summary['gate_total_errors']} total")
+        md.append(f"  - FN (Defect->Nuisance): {ge['defect_as_nuisance']}")
+        md.append(f"  - FP (Nuisance->Defect): {ge['nuisance_as_defect']}")
         md.append(f"")
-        md.append(f"**Fine Errors:** {fe_count} total  ")
+        md.append(f"**Fine Errors:** {fe_count} total")
         md.append(f"")
 
-        # Top confusion pairs
-        top_gate = summary.get('top_gate_confusion', [])
-        if top_gate:
-            md.append(f"### Top Gate Confusion Pairs")
-            md.append(f"")
-            md.append(f"| True Label | Pred Label | Count |")
-            md.append(f"|------------|------------|-------|")
-            for item in top_gate[:5]:
-                tn = name_of(item['true'], f"class_{item['true']}")
-                pn = name_of(item['pred'], f"class_{item['pred']}")
-                md.append(f"| {tn} | {pn} | {item['count']} |")
-            md.append(f"")
-
-        top_fine = summary.get('top_fine_confusion', [])
-        if top_fine:
-            md.append(f"### Top Fine Confusion Pairs")
-            md.append(f"")
-            md.append(f"| True Type | Pred Type | Count |")
-            md.append(f"|-----------|-----------|-------|")
-            for item in top_fine[:5]:
-                tn = name_of(item['true'], f"class_{item['true']}")
-                pn = name_of(item['pred'], f"class_{item['pred']}")
-                md.append(f"| {tn} | {pn} | {item['count']} |")
-            md.append(f"")
-
-        # Gate error rate bar per class
-        most_confused = summary.get('most_confused_classes', [])
-        if most_confused:
-            md.append(f"### Error Count by Class")
-            md.append(f"")
-            md.append(f"```")
-            max_err = max((c['errors'] for c in most_confused), default=1)
-            for c in most_confused:
-                bar = '█' * int(c['errors'] / max_err * 30)
-                cn = name_of(c['class'], f"class_{c['class']}")
-                md.append(f"  {cn:<12} {bar} ({c['errors']})")
-            md.append(f"```")
-            md.append(f"")
-
-        # Gate error details
-        if summary.get('gate_errors'):
-            md.append(f"### Gate Error Samples")
-            md.append(f"")
-            md.append(f"| # | File Path | True | Pred | Error Type | Defect Prob |")
-            md.append(f"|---|-----------|------|------|------------|-------------|")
-            for i, e in enumerate(summary['gate_errors'][:10]):
-                md.append(f"| {i+1} | `{e['path']}` | {e['true_name']} | {e['pred_name']} | {e['error_type']} | {e.get('defect_prob', 0):.4f} |")
-            md.append(f"")
-            if len(summary['gate_errors']) > 10:
-                md.append(f"*... and {len(summary['gate_errors']) - 10} more gate errors (see JSON report)*")
-                md.append(f"")
-
-        # Fine error details
-        if summary.get('fine_errors'):
-            md.append(f"### Fine Error Samples")
-            md.append(f"")
-            md.append(f"| # | File Path | True Type | Pred Type | Prob |")
-            md.append(f"|---|-----------|-----------|-----------|------|")
-            for i, e in enumerate(summary['fine_errors'][:10]):
-                md.append(f"| {i+1} | `{e['path']}` | {e['true_name']} | {e['pred_name']} | {e.get('pred_prob', 0):.4f} |")
-            md.append(f"")
-            if len(summary['fine_errors']) > 10:
-                md.append(f"*... and {len(summary['fine_errors']) - 10} more fine errors (see JSON report)*")
-                md.append(f"")
-
-        # Anomaly detection stats
-        if summary.get('anomaly_stats'):
-            as_data = summary['anomaly_stats']
-            md.append(f"### Anomaly Detection Stats")
-            md.append(f"")
-            md.append(f"| Stat | Value |")
-            md.append(f"|------|-------|")
-            md.append(f"| Distance Mean | `{as_data.get('dist_mean', 0):.4f}` |")
-            md.append(f"| Distance Std | `{as_data.get('dist_std', 0):.4f}` |")
-            md.append(f"| Z-Score Threshold | `{as_data.get('threshold_used', 2.0)}` |")
-            md.append(f"")
-            md.append(f"> Samples with anomaly score > {as_data.get('threshold_used', 2.0)} σ are flagged as **unknown/novel defects**.")
-            md.append(f"")
-
-    # ── 6. Training History ──────────────────────────────────────────────────
+    # Training History
     if history:
         md.append(f"## 5. Training History")
         md.append(f"")
-        md.append(f"### Loss Curve")
-        md.append(f"")
-        md.append(f"| Epoch | Train Loss | Val Loss |")
-        md.append(f"|-------|------------|---------|")
+        md.append(f"| Epoch | Train Loss | Val Loss | Gate Acc | Fine F1 |")
+        md.append(f"|-------|------------|---------|---------|---------|")
         for rec in history:
-            md.append(f"| {rec['epoch']} | {rec['train_loss']:.4f} | {rec['val_loss']:.4f} |")
+            md.append(f"| {rec['epoch']} | {rec['train_loss']:.4f} | {rec['val_loss']:.4f} | "
+                      f"{rec.get('gate_accuracy', 0):.4f} | {rec.get('fine_macro_f1', 0):.4f} |")
         md.append(f"")
 
-        # ASCII loss chart
-        train_losses = [r['train_loss'] for r in history]
-        val_losses = [r['val_loss'] for r in history]
-        max_loss = max(max(train_losses or [1]), max(val_losses or [1]))
-        chart_lines = ["```", "Loss (lower is better)"]
-        chart_lines.append(f"  Train ▐{'█' * 15} {train_losses[-1] if train_losses else 0:.4f} (final)")
-        chart_lines.append(f"  Val   ▐{'▓' * 15} {val_losses[-1] if val_losses else 0:.4f} (final)")
-        chart_lines.append(f"  Min   {'─' * 15} {min(val_losses or [0]):.4f} (best)")
-        chart_lines.append("  Epoch " + "".join(f"{i%10}" for i in range(1, len(history)+1)))
-        chart_lines.append("```")
-        md.extend(chart_lines)
-        md.append(f"")
-
-        md.append(f"### Accuracy & F1 Per Epoch")
-        md.append(f"")
-        md.append(f"| Epoch | Gate Acc | Defect Recall | Fine Acc | Macro F1 |")
-        md.append(f"|-------|-----------|----------------|-----------|----------|")
-        for rec in history:
-            md.append(f"| {rec['epoch']} | {rec['gate_accuracy']:.4f} | {rec['gate_defect_recall']:.4f} | "
-                      f"{rec['fine_accuracy']:.4f} | {rec['fine_macro_f1']:.4f} |")
-        md.append(f"")
-
-        # Error count chart
-        md.append(f"### Error Count Per Epoch")
-        md.append(f"")
-        md.append(f"| Epoch | Gate Errors | Fine Errors |")
-        md.append(f"|-------|-------------|-------------|")
-        for rec in history:
-            md.append(f"| {rec['epoch']} | {rec['gate_errors']} | {rec['fine_errors']} |")
-        md.append(f"")
-
-        ge_vals = [r['gate_errors'] for r in history]
-        fe_vals = [r['fine_errors'] for r in history]
-        max_err = max(max(ge_vals or [1]), max(fe_vals or [1]))
-        err_chart = ["```", "Errors (lower is better)"]
-        err_chart.append(f"  Gate ▐{'█' * min(int(ge_vals[-1]/max_err*20), 20) if ge_vals else 0} {ge_vals[-1] if ge_vals else 0} (final)")
-        err_chart.append(f"  Fine ▐{'▓' * min(int(fe_vals[-1]/max_err*20), 20) if fe_vals else 0} {fe_vals[-1] if fe_vals else 0} (final)")
-        err_chart.append("```")
-        md.extend(err_chart)
-        md.append(f"")
-
-    # ── 7. Recommendations ───────────────────────────────────────────────────
-    md.append(f"## 6. Recommendations")
-    md.append(f"")
-    recommendations = []
-    if summary:
-        fn_rate = gate.get('defect_as_nuisance_rate', 1.0)
-        fp_rate = gate.get('nuisance_as_defect_rate', 1.0)
-        if fn_rate > 0.1:
-            recommendations.append(f"- 🔴 **高漏检率 ({fn_rate:.1%})**: 增加 defect class 样本，或提高 `defect_weight`")
-        if fp_rate > 0.1:
-            recommendations.append(f"- 🟡 **高误报率 ({fp_rate:.1%})**: Nuisance 样本可能存在与缺陷相似的纹理，尝试数据增强")
-        fine_f1 = fine.get('macro_f1', 0)
-        if fine_f1 < 0.7:
-            recommendations.append(f"- 🟡 **Fine F1 偏低 ({fine_f1:.1%})**: 缺陷类型之间特征区分度不足，考虑增加 margin-based loss")
-        if fine.get('accuracy', 0) < 0.5:
-            recommendations.append(f"- 🔴 **Fine Accuracy 过低**: 检查标签映射是否正确（已修复 class_names 类型问题）")
-        gate_acc = gate.get('accuracy', 0)
-        if gate_acc < 0.8:
-            recommendations.append(f"- 🟠 **Gate Accuracy 偏低 ({gate_acc:.1%})**: 二分类边界模糊，增加训练 epochs 或调整学习率")
-    if not recommendations:
-        recommendations.append(f"- ✅ 模型表现良好，继续监控验证集指标")
-    md.extend(recommendations)
-    md.append(f"")
     md.append(f"---")
-    md.append(f"*Report generated by WaferDefectTrainer · {now}*")
+    md.append(f"*Report generated by WaferDefectTrainer - {now}*")
 
-    # Write file
     content = "\n".join(md)
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(content)
 
-    print(f"\n📄 Markdown report saved → {report_path}")
+    print(f"\nReport saved -> {report_path}")
     return report_path
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Base Trainer
+# ─────────────────────────────────────────────────────────────────────────────
+
 class WaferDefectTrainer:
     """
-    Trainer for wafer defect classification model.
-    Includes misclassification tracking for dataset debugging.
+    Base trainer for wafer defect classification model.
+
+    Supports:
+    - Classification training (Gate + Fine heads)
+    - Misclassification tracking
+    - Markdown report generation
+    - Checkpoint saving/loading
+
+    Args:
+        model: The model to train
+        optimizer: Optimizer instance
+        device: Device to use
+        gate_weight: Gate loss weight
+        fine_weight: Fine loss weight
+        metric_weight: Metric loss weight
+        defect_weight: Weight for defect class in gate loss
+        output_dir: Output directory for checkpoints and reports
+        class_names: Class name mapping
     """
 
     def __init__(
@@ -591,7 +417,6 @@ class WaferDefectTrainer:
         self.gate_metrics = GateMetrics()
         self.fine_metrics = FineMetrics(num_classes=model.num_defect_classes)
 
-        # Misclassification tracking
         self.tracker = MisclassificationTracker(
             class_names=class_names,
             num_classes=model.num_defect_classes
@@ -626,10 +451,8 @@ class WaferDefectTrainer:
             mask = defect_type > 0
             defect_type_adjusted[mask] = defect_type[mask] - 1
 
-            # Forward
             outputs = self.model(images, return_features=True)
 
-            # Compute loss
             losses = self.criterion(
                 gate_logits=outputs["gate_logits"],
                 fine_logits=outputs["fine_logits"],
@@ -640,17 +463,13 @@ class WaferDefectTrainer:
 
             loss = losses["total"]
 
-            # Backward
             self.optimizer.zero_grad()
             loss.backward()
-            # Clip gradients to prevent explosion (common with DINOv3 backbone)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
-            # Metrics
             gate_metrics.update(outputs["gate_logits"], is_defect)
 
-            # Fine metrics only for defect samples
             defect_mask = is_defect == 1
             if defect_mask.sum() > 0:
                 fine_metrics.update(
@@ -663,9 +482,10 @@ class WaferDefectTrainer:
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-        # Update anomaly centers at end of epoch
+        # Update anomaly centers at end of epoch (only for models that support it)
         with torch.no_grad():
-            self._update_anomaly_centers(train_loader)
+            if hasattr(self.model, 'update_anomaly_centers'):
+                self._update_anomaly_centers(train_loader)
 
         return {
             "train_loss": total_loss / num_batches,
@@ -691,13 +511,10 @@ class WaferDefectTrainer:
         all_feats = torch.cat(all_feats, dim=0)
         all_labels = torch.cat(all_labels, dim=0)
 
-        # Only use defect samples for centers
         mask = all_labels > 0
         if mask.sum() > 0:
-            # defect_type from dataset is 1~K, but update_centers expects 0~(K-1)
             self.model.update_anomaly_centers(all_feats[mask], all_labels[mask] - 1)
 
-            # Update normalization statistics
             if hasattr(self.model, 'anomaly') and hasattr(self.model.anomaly, 'update_statistics'):
                 self.model.anomaly.update_statistics(all_feats[mask])
 
@@ -721,13 +538,11 @@ class WaferDefectTrainer:
         total_loss = 0
         num_batches = 0
 
-        # Reset tracker for validation
         tracker = MisclassificationTracker(
             class_names=self.class_names,
             num_classes=self.model.num_defect_classes
         )
 
-        # Try to get dataset for path info
         dataset = getattr(val_loader, 'dataset', None)
         parent_dataset = None
         if hasattr(dataset, 'parent'):
@@ -769,19 +584,17 @@ class WaferDefectTrainer:
                     defect_type_adjusted[defect_mask]
                 )
 
-            # Track misclassifications
             if save_errors and parent_dataset is not None:
                 gate_probs = torch.softmax(outputs["gate_logits"], dim=1)
                 fine_probs = torch.softmax(outputs["fine_logits"], dim=1)
 
-                gate_preds = outputs["is_defect_pred"]
-                fine_preds = outputs["fine_pred"]
+                gate_preds = outputs["is_defect"]
+                fine_preds = outputs["defect_type"]
 
                 for i in range(batch_size):
                     sample_idx = sample_idx_offset + i
                     sample_info = self._get_sample_info(parent_dataset, sample_idx)
 
-                    # Gate errors
                     true_is_defect = is_defect[i].item()
                     pred_is_defect = gate_preds[i].item()
                     if true_is_defect != pred_is_defect:
@@ -793,14 +606,11 @@ class WaferDefectTrainer:
                             defect_prob=gate_probs[i][1].item()
                         )
 
-                    # Fine errors (only for defect samples)
                     if defect_mask[i] and defect_type[i] > 0:
                         true_defect = defect_type[i].item()
                         pred_defect = fine_preds[i].item()
-                        # Adjust for the -1 padding in fine_logits
-                        pred_defect_adjusted = pred_defect
 
-                        if true_defect != pred_defect + 1:  # +1 because pred is in 0~(K-1)
+                        if true_defect != pred_defect + 1:
                             tracker.add_fine_error(
                                 path=sample_info.get('path', f"sample_{sample_idx}"),
                                 true_label=true_defect,
@@ -812,14 +622,11 @@ class WaferDefectTrainer:
             num_batches += 1
             sample_idx_offset += batch_size
 
-        # Save misclassification report
         summary = tracker.get_summary()
 
-        # Compute anomaly score statistics for reference
         anomaly_stats = None
         if hasattr(self.model, 'anomaly'):
             anomaly = self.model.anomaly
-            # Handle both class-center (AnomalyHead) and RAD (RADAnomalyHead) models
             if hasattr(anomaly, 'dist_mean') and hasattr(anomaly, 'dist_std'):
                 dist_mean = anomaly.dist_mean.item()
                 dist_std = anomaly.dist_std.item()
@@ -849,28 +656,30 @@ class WaferDefectTrainer:
                       f"dist_std={anomaly_stats['dist_std']:.4f}")
             print(f"  Report saved to: {report_path}/")
 
-        result = {
+        return {
             "val_loss": total_loss / num_batches,
             "gate_metrics": gate_metrics.compute(),
             "fine_metrics": fine_metrics.compute(),
             "misclassification_summary": summary if save_errors else None
         }
 
-        return result
-
     def _get_sample_info(self, dataset, idx: int) -> dict:
         """Get sample information including file paths."""
         info = {'path': f'sample_{idx}'}
 
-        # Try RealWaferDataset
         if hasattr(dataset, 'samples') and idx < len(dataset.samples):
             sample = dataset.samples[idx]
-            if 'paths' in sample and sample['paths']:
-                info['path'] = str(sample['paths'][0])  # First view path
-            info['label'] = sample.get('label', -1)
-            info['is_defect'] = sample.get('is_defect', -1)
+            # Handle both dict samples (real data) and WaferDefectSample objects (synthetic)
+            if isinstance(sample, dict):
+                if 'paths' in sample and sample['paths']:
+                    info['path'] = str(sample['paths'][0])
+                info['label'] = sample.get('label', -1)
+                info['is_defect'] = sample.get('is_defect', -1)
+            else:
+                # WaferDefectSample object
+                info['label'] = getattr(sample, 'label', -1)
+                info['is_defect'] = getattr(sample, 'is_defect', -1)
 
-        # Try SubsetDataset
         elif hasattr(dataset, 'indices') and hasattr(dataset, 'parent'):
             real_idx = dataset.indices[idx]
             return self._get_sample_info(dataset.parent, real_idx)
@@ -885,17 +694,14 @@ class WaferDefectTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "class_names": self.class_names,
         }
-        # Save anomaly/RAD stats if present (RAD bank itself is saved separately via rad_bank.pth)
         if hasattr(self.model, 'anomaly'):
             anomaly = self.model.anomaly
-            # AnomalyHead: dist_mean/dist_std
             if hasattr(anomaly, 'dist_mean'):
                 v = anomaly.dist_mean
                 ckpt["anomaly_score_mean"] = v.item() if isinstance(v, torch.Tensor) else float(v)
             if hasattr(anomaly, 'dist_std'):
                 v = anomaly.dist_std
                 ckpt["anomaly_score_std"] = v.item() if isinstance(v, torch.Tensor) else float(v)
-            # RADAnomalyHead: _score_mean/_score_std
             if hasattr(anomaly, '_score_mean'):
                 v = anomaly._score_mean
                 ckpt["rad_score_mean"] = v.item() if isinstance(v, torch.Tensor) else float(v)
@@ -904,7 +710,6 @@ class WaferDefectTrainer:
                 ckpt["rad_score_std"] = v.item() if isinstance(v, torch.Tensor) else float(v)
             if hasattr(anomaly, 'anomaly_threshold'):
                 ckpt["anomaly_threshold"] = float(anomaly.anomaly_threshold)
-            # Flag for RAD mode
             ckpt["use_rad_anomaly"] = getattr(self.model, 'use_rad_anomaly', False)
         if extra:
             ckpt.update(extra)
@@ -916,7 +721,6 @@ class WaferDefectTrainer:
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.class_names = checkpoint.get("class_names", {})
-        # Restore anomaly/RAD stats
         if hasattr(self.model, 'anomaly'):
             anomaly = self.model.anomaly
             if "anomaly_score_mean" in checkpoint and hasattr(anomaly, 'dist_mean'):
@@ -930,3 +734,425 @@ class WaferDefectTrainer:
             if "anomaly_threshold" in checkpoint and hasattr(anomaly, 'anomaly_threshold'):
                 anomaly.anomaly_threshold = checkpoint["anomaly_threshold"]
         return checkpoint.get("epoch", 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Three-Phase Trainer
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ThreePhaseTrainer:
+    """
+    Three-phase trainer for wafer defect classification with Dinomaly2.
+
+    Phase 1 (classification): Train Gate + Fine heads
+    Phase 2 (dinomaly2): Train Dinomaly2 decoder
+    Phase 3 (joint): Joint fine-tuning (optional)
+
+    Args:
+        model: The WaferDefectModel to train
+        optimizer: Optimizer instance
+        device: Device to use
+        output_dir: Output directory for checkpoints
+        class_names: Class name mapping
+        phase1_config: Configuration for Phase 1
+        phase2_config: Configuration for Phase 2
+        phase3_config: Configuration for Phase 3
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        device: str = "cuda",
+        output_dir: str = "output",
+        class_names: dict = None,
+        phase1_config: dict = None,
+        phase2_config: dict = None,
+        phase3_config: dict = None,
+    ):
+        self.model = model
+        self.optimizer = optimizer
+        self.device = device
+        self.output_dir = output_dir
+        self.class_names = class_names or {}
+
+        # Default configurations
+        self.phase1_config = phase1_config or {
+            'gate_weight': 1.0,
+            'fine_weight': 0.5,
+            'metric_weight': 0.1,
+            'defect_weight': 3.0,
+        }
+
+        self.phase2_config = phase2_config or {
+            'lr': 2e-3,
+            'iters': 40000,
+            'log_interval': 500,
+        }
+
+        self.phase3_config = phase3_config or {
+            'lr': 1e-5,
+            'epochs': 5,
+        }
+
+        # Current phase
+        self.current_phase = None
+        self.phase_history = {}
+
+        # Create base trainer for Phase 1 and 3
+        self.base_trainer = WaferDefectTrainer(
+            model=model,
+            optimizer=optimizer,
+            device=device,
+            gate_weight=self.phase1_config.get('gate_weight', 1.0),
+            fine_weight=self.phase1_config.get('fine_weight', 0.5),
+            metric_weight=self.phase1_config.get('metric_weight', 0.1),
+            defect_weight=self.phase1_config.get('defect_weight', 3.0),
+            output_dir=output_dir,
+            class_names=class_names,
+        )
+
+        os.makedirs(output_dir, exist_ok=True)
+
+    def set_phase(self, phase: str):
+        """
+        Set the current training phase.
+
+        Args:
+            phase: One of "classification", "dinomaly2", "joint"
+        """
+        valid_phases = [PHASE_CLASSIFICATION, PHASE_DINOMALITY2, PHASE_JOINT]
+        if phase not in valid_phases:
+            raise ValueError(f"Invalid phase: {phase}. Must be one of {valid_phases}")
+
+        if self.current_phase != phase:
+            print(f"\n{'=' * 60}")
+            print(f"Switching to Phase: {phase.upper()}")
+            print(f"{'=' * 60}")
+            self.current_phase = phase
+
+            # Configure optimizer for the phase
+            self._configure_optimizer(phase)
+
+    def _configure_optimizer(self, phase: str):
+        """Configure optimizer for the given phase."""
+        if phase == PHASE_CLASSIFICATION:
+            # Classification: use main learning rate
+            for param_group in self.optimizer.param_groups:
+                if 'lr' not in param_group:
+                    param_group['lr'] = self.phase1_config.get('lr', 1e-4)
+
+        elif phase == PHASE_DINOMALITY2:
+            # Dinomaly2: higher learning rate for decoder
+            dinomaly_lr = self.phase2_config.get('lr', 2e-3)
+            # Note: This would need access to decoder parameters specifically
+            print(f"[Phase 2] Dinomaly2 decoder LR: {dinomaly_lr}")
+
+        elif phase == PHASE_JOINT:
+            # Joint: lower learning rate for fine-tuning
+            joint_lr = self.phase3_config.get('lr', 1e-5)
+            print(f"[Phase 3] Joint fine-tuning LR: {joint_lr}")
+
+    def train_phase1(
+        self,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        epochs: int,
+        save_checkpoints: bool = True,
+    ) -> List[dict]:
+        """
+        Phase 1: Train classification heads (Gate + Fine).
+
+        Args:
+            train_loader: Training data loader
+            val_loader: Validation data loader
+            epochs: Number of epochs to train
+            save_checkpoints: Whether to save checkpoints
+
+        Returns:
+            List of epoch records
+        """
+        print("\n" + "=" * 60)
+        print("PHASE 1: Classification Training (Gate + Fine Heads)")
+        print("=" * 60)
+
+        self.set_phase(PHASE_CLASSIFICATION)
+        self.phase_history[PHASE_CLASSIFICATION] = []
+
+        best_val_loss = float('inf')
+        best_epoch = 0
+
+        for epoch in range(1, epochs + 1):
+            print(f"\n--- Epoch {epoch}/{epochs} ---")
+
+            train_results = self.base_trainer.train_epoch(train_loader, epoch)
+            val_results = self.base_trainer.validate(val_loader)
+
+            print(f"Train Loss: {train_results['train_loss']:.4f}")
+            print(f"Gate - Acc: {train_results['gate_metrics']['accuracy']:.4f}, "
+                  f"Defect Recall: {train_results['gate_metrics']['defect_recall']:.4f}")
+            print(f"Fine - Acc: {val_results['fine_metrics']['accuracy']:.4f}, "
+                  f"Macro F1: {val_results['fine_metrics']['macro_f1']:.4f}")
+
+            summary = val_results.get('misclassification_summary')
+            record = {
+                'epoch': epoch,
+                'train_loss': train_results['train_loss'],
+                'val_loss': val_results['val_loss'],
+                'gate_accuracy': train_results['gate_metrics']['accuracy'],
+                'gate_defect_recall': train_results['gate_metrics']['defect_recall'],
+                'fine_accuracy': val_results['fine_metrics']['accuracy'],
+                'fine_macro_f1': val_results['fine_metrics']['macro_f1'],
+                'gate_errors': summary['gate_total_errors'] if summary else 0,
+                'fine_errors': summary['fine_total_errors'] if summary else 0,
+            }
+            self.phase_history[PHASE_CLASSIFICATION].append(record)
+
+            if save_checkpoints and val_results['val_loss'] < best_val_loss:
+                best_val_loss = val_results['val_loss']
+                best_epoch = epoch
+                ckpt_path = os.path.join(self.output_dir, "phase1_best.pt")
+                self.save_checkpoint(ckpt_path, epoch, phase=PHASE_CLASSIFICATION)
+                print(f"New best! Loss: {best_val_loss:.4f}")
+
+        if save_checkpoints:
+            last_path = os.path.join(self.output_dir, "phase1_last.pt")
+            self.save_checkpoint(last_path, epochs, phase=PHASE_CLASSIFICATION)
+
+        print(f"\nPhase 1 complete. Best epoch: {best_epoch} (loss={best_val_loss:.4f})")
+        return self.phase_history[PHASE_CLASSIFICATION]
+
+    def train_phase2(
+        self,
+        defect_loader: DataLoader,
+        save_decoder: bool = True,
+    ) -> dict:
+        """
+        Phase 2: Train Dinomaly2 decoder.
+
+        Args:
+            defect_loader: DataLoader with defect samples only
+            save_decoder: Whether to save the trained decoder
+
+        Returns:
+            Training info dict
+        """
+        print("\n" + "=" * 60)
+        print("PHASE 2: Dinomaly2 Decoder Training")
+        print("=" * 60)
+
+        self.set_phase(PHASE_DINOMALITY2)
+
+        if not self.model.use_dinomaly2:
+            print("[Warning] Dinomaly2 is not enabled. Skipping Phase 2.")
+            return {'status': 'skipped'}
+
+        # Train the decoder
+        save_path = os.path.join(self.output_dir, "dinomaly2_decoder.pth") if save_decoder else None
+        self.model.build_dinomaly2(
+            defect_loader=defect_loader,
+            device=self.device,
+            save_path=save_path,
+            log_interval=self.phase2_config.get('log_interval', 500),
+        )
+
+        print(f"Dinomaly2 decoder training complete.")
+        if save_decoder:
+            print(f"Decoder saved to: {save_path}")
+
+        self.phase_history[PHASE_DINOMALITY2] = {
+            'status': 'completed',
+            'decoder_path': save_path,
+        }
+        return self.phase_history[PHASE_DINOMALITY2]
+
+    def train_phase3(
+        self,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        epochs: Optional[int] = None,
+        save_checkpoints: bool = True,
+    ) -> List[dict]:
+        """
+        Phase 3: Joint fine-tuning (optional).
+
+        Fine-tunes the entire model with a lower learning rate.
+
+        Args:
+            train_loader: Training data loader
+            val_loader: Validation data loader
+            epochs: Number of epochs (uses config if None)
+            save_checkpoints: Whether to save checkpoints
+
+        Returns:
+            List of epoch records
+        """
+        print("\n" + "=" * 60)
+        print("PHASE 3: Joint Fine-Tuning")
+        print("=" * 60)
+
+        self.set_phase(PHASE_JOINT)
+
+        # Reduce learning rate for joint fine-tuning
+        joint_lr = self.phase3_config.get('lr', 1e-5)
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = joint_lr
+        print(f"Learning rate reduced to: {joint_lr}")
+
+        epochs = epochs or self.phase3_config.get('epochs', 5)
+        self.phase_history[PHASE_JOINT] = []
+
+        best_val_loss = float('inf')
+        best_epoch = 0
+
+        for epoch in range(1, epochs + 1):
+            print(f"\n--- Epoch {epoch}/{epochs} ---")
+
+            train_results = self.base_trainer.train_epoch(train_loader, epoch)
+            val_results = self.base_trainer.validate(val_loader)
+
+            print(f"Train Loss: {train_results['train_loss']:.4f}")
+            print(f"Gate - Acc: {train_results['gate_metrics']['accuracy']:.4f}, "
+                  f"Defect Recall: {train_results['gate_metrics']['defect_recall']:.4f}")
+            print(f"Fine - Acc: {val_results['fine_metrics']['accuracy']:.4f}, "
+                  f"Macro F1: {val_results['fine_metrics']['macro_f1']:.4f}")
+
+            summary = val_results.get('misclassification_summary')
+            record = {
+                'epoch': epoch,
+                'train_loss': train_results['train_loss'],
+                'val_loss': val_results['val_loss'],
+                'gate_accuracy': train_results['gate_metrics']['accuracy'],
+                'gate_defect_recall': train_results['gate_metrics']['defect_recall'],
+                'fine_accuracy': val_results['fine_metrics']['accuracy'],
+                'fine_macro_f1': val_results['fine_metrics']['macro_f1'],
+                'gate_errors': summary['gate_total_errors'] if summary else 0,
+                'fine_errors': summary['fine_total_errors'] if summary else 0,
+            }
+            self.phase_history[PHASE_JOINT].append(record)
+
+            if save_checkpoints and val_results['val_loss'] < best_val_loss:
+                best_val_loss = val_results['val_loss']
+                best_epoch = epoch
+                ckpt_path = os.path.join(self.output_dir, "phase3_best.pt")
+                self.save_checkpoint(ckpt_path, epoch, phase=PHASE_JOINT)
+                print(f"New best! Loss: {best_val_loss:.4f}")
+
+        if save_checkpoints:
+            last_path = os.path.join(self.output_dir, "phase3_last.pt")
+            self.save_checkpoint(last_path, epochs, phase=PHASE_JOINT)
+
+        print(f"\nPhase 3 complete. Best epoch: {best_epoch} (loss={best_val_loss:.4f})")
+        return self.phase_history[PHASE_JOINT]
+
+    def train_all_phases(
+        self,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        defect_loader: DataLoader = None,
+        phase1_epochs: int = 10,
+        phase3_epochs: Optional[int] = None,
+        skip_phase2: bool = False,
+        skip_phase3: bool = False,
+    ) -> dict:
+        """
+        Run the full three-phase training pipeline.
+
+        Args:
+            train_loader: Training data loader
+            val_loader: Validation data loader
+            defect_loader: Defect-only loader for Dinomaly2 (optional)
+            phase1_epochs: Epochs for Phase 1
+            phase3_epochs: Epochs for Phase 3 (optional)
+            skip_phase2: Skip Dinomaly2 training
+            skip_phase3: Skip joint fine-tuning
+
+        Returns:
+            Full training history
+        """
+        history = {}
+
+        # Phase 1: Classification
+        history['phase1'] = self.train_phase1(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=phase1_epochs,
+        )
+
+        # Load best model from Phase 1 for Phase 2
+        best_p1_path = os.path.join(self.output_dir, "phase1_best.pt")
+        if os.path.exists(best_p1_path):
+            self.load_checkpoint(best_p1_path)
+            print("Loaded Phase 1 best model for Phase 2...")
+
+        # Phase 2: Dinomaly2 (if enabled and data provided)
+        if not skip_phase2 and self.model.use_dinomaly2:
+            if defect_loader is not None:
+                history['phase2'] = self.train_phase2(defect_loader=defect_loader)
+            else:
+                print("[Warning] No defect_loader provided for Phase 2. Skipping.")
+                history['phase2'] = {'status': 'skipped', 'reason': 'no_defect_loader'}
+        else:
+            history['phase2'] = {'status': 'skipped'}
+
+        # Phase 3: Joint fine-tuning
+        if not skip_phase3:
+            history['phase3'] = self.train_phase3(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=phase3_epochs,
+            )
+        else:
+            history['phase3'] = {'status': 'skipped'}
+
+        # Save final combined model
+        final_path = os.path.join(self.output_dir, "final_model.pt")
+        self.save_checkpoint(final_path, epoch=-1, phase='final')
+
+        self.phase_history = history
+        return history
+
+    def save_checkpoint(self, path: str, epoch: int, phase: str = None, extra: dict = None):
+        """Save model checkpoint with phase information."""
+        ckpt = {
+            "epoch": epoch,
+            "phase": phase or self.current_phase,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "class_names": self.class_names,
+            "phase_history": self.phase_history,
+        }
+        if hasattr(self.model, 'anomaly'):
+            anomaly = self.model.anomaly
+            if hasattr(anomaly, 'dist_mean'):
+                v = anomaly.dist_mean
+                ckpt["anomaly_score_mean"] = v.item() if isinstance(v, torch.Tensor) else float(v)
+            if hasattr(anomaly, 'dist_std'):
+                v = anomaly.dist_std
+                ckpt["anomaly_score_std"] = v.item() if isinstance(v, torch.Tensor) else float(v)
+        if extra:
+            ckpt.update(extra)
+        torch.save(ckpt, path)
+
+    def load_checkpoint(self, path: str):
+        """Load model checkpoint and restore state."""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.class_names = checkpoint.get("class_names", {})
+        self.phase_history = checkpoint.get("phase_history", {})
+        if hasattr(self.model, 'anomaly'):
+            anomaly = self.model.anomaly
+            if "anomaly_score_mean" in checkpoint and hasattr(anomaly, 'dist_mean'):
+                anomaly.dist_mean = torch.tensor(checkpoint["anomaly_score_mean"])
+            if "anomaly_score_std" in checkpoint and hasattr(anomaly, 'dist_std'):
+                anomaly.dist_std = torch.tensor(checkpoint["anomaly_score_std"])
+        return checkpoint.get("epoch", 0)
+
+    def validate(self, val_loader: DataLoader, save_errors: bool = True) -> dict:
+        """Run validation using the base trainer."""
+        return self.base_trainer.validate(val_loader, save_errors=save_errors)
+
+    def get_history(self) -> dict:
+        """Get the full training history across all phases."""
+        return self.phase_history

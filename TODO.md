@@ -16,7 +16,7 @@
 ### 2.1 输入预处理层
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 主图区域 + 底部刻度区域分离 | ✅ 已实现 | Updated: 2026-04-02 13:09:09 | Updated: 2026-04-02 10:35:01 | Updated: 2026-04-02 09:58:03 | Updated: 2026-03-25 10:02:56 | `RealWaferDataset` 默认裁剪底部40px |
+| 主图区域 + 底部刻度区域分离 | ✅ 已实现 | Updated: 2026-04-08 19:18:21 | Updated: 2026-04-02 13:09:09 | Updated: 2026-04-02 10:35:01 | Updated: 2026-04-02 09:58:03 | Updated: 2026-03-25 10:02:56 | `RealWaferDataset` 默认裁剪底部40px |
 | 底部区域单独处理 | ⚠️ 部分 | 当前仅做裁剪，未做 OCR/数值解析 |
 | 可变尺寸图片resize | ✅ 已实现 | 504-680px → 统一224x224 |
 
@@ -30,32 +30,33 @@
 | 需求 | 状态 | 说明 |
 |------|------|------|
 | 共享 encoder | ✅ 已实现 | 同一 backbone 提取三视角特征 |
-| attention/gating 融合 | ✅ 已实现 | `MultiViewFusion` 支持 mean/attention/gated |
+| attention/gating 融合 | ✅ 已实现 | Updated: 2026-04-08 19:18:21 | `MultiViewFusion` 支持 mean/attention/gated |
 | 输出 group-level 结果 | ✅ 已实现 | 融合后统一输出 |
 | 三视角识别（实际数据格式） | ✅ 已实现 | 正则匹配 `IxxK` 模式 (00/01/02) |
 
 ### 2.4 Gate Head (Nuisance vs Defect)
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 二分类主头 | ✅ 已实现 | Updated: 2026-04-01 21:14:15 | `GateHead` 输出 2 类 |
+| 二分类主头 | ✅ 已实现 | Updated: 2026-04-08 19:18:21 | Updated: 2026-04-08 19:18:21 | Updated: 2026-04-01 21:14:15 | `GateHead` 输出 2 类 |
 | 拒识/不确定性头 | ✅ 已实现 | `UncertaintyHead` |
 | 阈值可调 risk-aware decision | ✅ 已实现 | `defect_weight` 参数可调 |
 
 ### 2.5 Fine Head (Defect 细分类)
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 多类分类头 | ✅ 已实现 | `FineHead` |
+| 多类分类头 | ✅ 已实现 | Updated: 2026-04-08 19:18:21 | Updated: 2026-04-08 19:18:21 | `FineHead` |
 | 原型/类中心约束 | ✅ 已实现 | `PrototypeClassifier` |
 | SupCon 辅助损失 | ✅ 已实现 | `MetricLoss` (SupCon) |
 
 ### 2.6 未知/新缺陷检测
 | 需求 | 状态 | 说明 |
 |------|------|------|
-| 类中心距离检测 | ✅ 已实现 | Updated: 2026-04-01 20:50:03 | `AnomalyHead` 使用 z-score 归一化 |
+| 类中心距离检测 | ✅ 已实现 | Updated: 2026-04-08 19:18:21 | Updated: 2026-04-01 20:50:03 | `AnomalyHead` 使用 z-score 归一化 |
 | 能量分数 | ✅ 已实现 | 与距离组合 (0.7*距离 + 0.3*能量) |
 | 未知缺陷标记 | ✅ 已实现 | `is_unknown_defect` 输出 |
 | 自动校准阈值 | ✅ 已实现 | 训练后自动计算95百分位 |
 | **RAD 多层 Patch-KNN** | ✅ 已实现 | 2026-04-01 | `RADAnomalyHead` + `--use_rad_anomaly` |
+| **Dinomaly 自监督解码器** | ✅ 已实现 | 2026-04-01 | `DinomalyAnomalyHead` + `--use_dinomaly` |
 
 ### 2.7 RAD 多层 Patch-KNN 异常检测
 | 需求 | 状态 | 说明 |
@@ -66,7 +67,21 @@
 | RAD 校准阈值 | ✅ 已实现 | 2026-04-01 | `calibrate()` 方法 |
 | `--use_rad_anomaly` 开关 | ✅ 已实现 | 2026-04-01 | `--rad_layer_indices`, `--rad_k_image` |
 
-### 2.8 错分样本追踪
+### 2.8 Dinomaly 自监督解码器异常检测
+| 需求 | 状态 | 说明 |
+|------|------|------|
+| ViTill 架构封装 | ✅ 已实现 | 2026-04-01 | `dinomaly_head.py` 内置实现 |
+| 冻结 DINOv3 编码器 | ✅ 已实现 | 2026-04-01 | 复用 WaferDefectModel backbone |
+| 可学习瓶颈层 (bMlp) | ✅ 已实现 | 2026-04-01 | Linear → GELU → Linear → Dropout |
+| 可学习解码器 (8× LinearAttention2) | ✅ 已实现 | 2026-04-01 | 8层线性注意力块 |
+| Masked Global Cosine 损失 | ✅ 已实现 | 2026-04-01 | 仅高误差 patch 传递梯度 |
+| 训练后自编码器重建 | ✅ 已实现 | 2026-04-01 | `train_decoder()` + StableAdamW |
+| 重建误差作为异常分数 | ✅ 已实现 | 2026-04-01 | Per-patch cosine distance → heatmap |
+| `--use_dinomaly` 开关 | ✅ 已实现 | 2026-04-01 | `--dinomaly_iters`, `--dinomaly_lr`, `--dinomaly_layers` |
+| Decoder 保存/加载 | ✅ 已实现 | 2026-04-01 | `save()` / `load()` 方法 |
+| 热力图可视化 | ✅ 已实现 | 2026-04-01 | `demo_inference.py` 支持 Dinomaly 模式 |
+
+### 2.9 错分样本追踪
 | 需求 | 状态 | 说明 |
 |------|------|------|
 | Gate错分记录 | ✅ 已实现 | 漏检/误报分离 |
@@ -95,6 +110,18 @@
 | 最终模型保存 | ✅ 已实现 | 2026-04-01 | `last_model.pt` |
 | RAD Bank 保存/加载 | ✅ 已实现 | 2026-04-01 | `build_bank()` / checkpoint 内嵌 |
 
+### 2.12 Dinomaly² 自监督解码器异常检测
+| 需求 | 状态 | 说明 |
+|------|------|------|
+| ViTill2 架构封装 | ✅ 已实现 | 2026-04-03 | `dinomaly_head.py` 内置实现 |
+| Noisy Bottleneck | ✅ 已实现 | 2026-04-03 | 3层MLP + Dropout(p=0.2) |
+| Context-Aware Recentering | ✅ 已实现 | 2026-04-03 | patch - CLS before bottleneck |
+| Loose Reconstruction Loss | ✅ 已实现 | 2026-04-03 | 2组特征求和, 梯度缩放factor=0.1 |
+| τ Warmup | ✅ 已实现 | 2026-04-03 | τ从0%线性warmup到90% over 1000 iters |
+| `--use_dinomaly2` 开关 | ✅ 已实现 | 2026-04-03 | `--dinomaly2_iters/layers/dropout/img_size` |
+| Decoder 保存/加载 | ✅ 已实现 | 2026-04-03 | `save()`/`load()` (version=2) |
+| 热力图可视化 | ✅ 已实现 | 2026-04-03 | `demo_inference.py` 支持 Dinomaly2 模式 |
+
 ---
 
 ## 三、项目结构
@@ -110,6 +137,7 @@ wafer_defect/
 │   ├── fine_head.py           # Defect细分类
 │   ├── anomaly_head.py         # 类中心距离异常检测
 │   ├── rad_head.py            # RAD 多层 Patch-KNN 异常检测
+│   ├── dinomaly_head.py       # Dinomaly 自监督解码器异常检测
 │   └── full_model.py          # 完整模型
 ├── losses/__init__.py         # 损失函数
 ├── engine/trainer.py          # 训练引擎 + 错分追踪 + Markdown报告
@@ -142,6 +170,21 @@ PYTHONPATH=. python wafer_defect/train.py \
     --rad_k_image 5 \
     --epochs 50 --device cuda
 
+# 真实数据 + Dinomaly 自监督解码器异常检测
+PYTHONPATH=. python wafer_defect/train.py \
+    --data_dir /path/to/wafer_data \
+    --use_dinov3 --use_dinomaly \
+    --dinomaly_iters 3000 --dinomaly_lr 0.002 \
+    --epochs 50 --device cuda
+
+# 真实数据 + Dinomaly² 自监督解码器异常检测
+PYTHONPATH=. python wafer_defect/train.py \
+    --data_dir /path/to/wafer_data \
+    --use_dinov3 --use_dinomaly2 \
+    --dinomaly2_iters 40000 --dinomaly2_lr 0.002 \
+    --dinomaly2_dropout 0.2 --dinomaly2_img_size 392 \
+    --epochs 50 --device cuda
+
 # 合成数据（测试用）
 PYTHONPATH=. python wafer_defect/train.py --synthetic --epochs 10
 ```
@@ -166,6 +209,22 @@ PYTHONPATH=. python wafer_defect/demo_inference.py \
     --rad_bank output/rad_bank.pth \
     --data_dir /path/to/wafer_data \
     --use_dinov3 --use_rad_anomaly \
+    --output_dir output/demo
+
+# 真实数据 + Dinomaly 热力图
+PYTHONPATH=. python wafer_defect/demo_inference.py \
+    --checkpoint output/best_model.pt \
+    --dinomaly_decoder output/dinomaly_decoder.pth \
+    --data_dir /path/to/wafer_data \
+    --use_dinov3 --use_dinomaly \
+    --output_dir output/demo
+
+# 真实数据 + Dinomaly² 热力图
+PYTHONPATH=. python wafer_defect/demo_inference.py \
+    --checkpoint output/best_model.pt \
+    --dinomaly2_decoder output/dinomaly2_decoder.pth \
+    --data_dir /path/to/wafer_data \
+    --use_dinov3 --use_dinomaly2 \
     --output_dir output/demo
 ```
 
@@ -218,3 +277,4 @@ data/
 [2026-04-02 10:35:01] Completed via commit: fix(fix: resolve two label mismatch bugs in validation report): resolve two label mismatch bugs in validation report
 [2026-04-02 10:54:47] Completed via commit: feat(feat: add anomaly heatmap demo inference script): add anomaly heatmap demo inference script
 [2026-04-02 11:05:50] Completed via commit: docs(docs: update TODO.md with demo_inference.py entry): update TODO.md with demo_inference.py entry
+[2026-04-02 13:09:09] Completed via commit: fix(fix: make label assignment deterministic with alphabetical folder sort): make label assignment deterministic with alphabetical folder sort

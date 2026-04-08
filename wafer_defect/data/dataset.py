@@ -1,6 +1,11 @@
 """
-Wafer Defect Dataset with 3-view fusion.
-Supports both synthetic data generation and real folder-based data loading.
+Wafer Defect Dataset — supports both real folder-based data loading and synthetic data generation.
+
+Core classes:
+- RealWaferDataset: Load real wafer SEM images from folder structure
+- SyntheticWaferGenerator: Generate synthetic wafer images for verification
+
+Uses wafer_defect.data.preprocessor for image preprocessing pipeline.
 """
 
 import random
@@ -11,6 +16,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from PIL import Image, ImageDraw
+
+from .preprocessor import WaferPreprocessor, DEFAULT_IMG_SIZE, DEFAULT_CROP_BOTTOM
 
 
 class WaferDefectSample:
@@ -49,8 +56,9 @@ class RealWaferDataset(Dataset):
         └── ...
 
     Each sample: 3 views (命名: xxx_1.jpg, xxx_2.jpg, xxx_3.jpg)
-    Bottom 40px is scale bar area and will be cropped.
-    Images are resized to a fixed size for batch processing.
+    Images are preprocessed via WaferPreprocessor (crop bottom 40px, resize, normalize).
+
+    Supports single-view mode (default) and 3-view fusion mode.
     """
 
     IMG_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
@@ -58,26 +66,30 @@ class RealWaferDataset(Dataset):
     def __init__(
         self,
         root_dir: str,
-        img_size: int = 224,
-        crop_bottom: int = 40,
+        img_size: int = DEFAULT_IMG_SIZE,
+        crop_bottom: int = DEFAULT_CROP_BOTTOM,
         transform=None,
         nuisance_name: str = "Nuisance",
-        label_map: Optional[Dict[str, int]] = None
+        label_map: Optional[Dict[str, int]] = None,
+        use_three_views: bool = False,
     ):
         """
         Args:
             root_dir: 数据根目录
-            img_size: 统一resize到的尺寸
-            crop_bottom: 底部裁剪高度 (默认40px)
+            img_size: 统一resize到的尺寸 (default 392)
+            crop_bottom: 底部裁剪高度 (default 40px)
             transform: 可选的额外transform
             nuisance_name: 正常/无缺陷类别的文件夹名称
             label_map: 类别名到label id的映射，不提供则自动生成
+            use_three_views: 是否启用三视角融合模式。默认False（单视角模式）。
         """
         self.root_dir = Path(root_dir)
-        self.img_size = img_size
-        self.crop_bottom = crop_bottom
         self.transform = transform
         self.nuisance_name = nuisance_name
+        self.use_three_views = use_three_views
+
+        # Initialize preprocessor
+        self.preprocessor = WaferPreprocessor(img_size=img_size, crop_bottom=crop_bottom)
 
         self.samples = []  # List of (img_paths, label, is_defect)
         self.class_info = {}
@@ -89,9 +101,7 @@ class RealWaferDataset(Dataset):
         """扫描根目录下的所有类别文件夹"""
         class_dirs = [d for d in self.root_dir.iterdir()
                       if d.is_dir() and not d.name.startswith('.')]
-        # Sort alphabetically so label assignment is deterministic and reproducible
-        # across different systems / filesystem ordering.
-        # nuisance_name always gets label=0; defect folders get 1,2,3... alphabetically.
+        # Sort alphabetically for deterministic label assignment
         class_dirs.sort(key=lambda x: x.name)
 
         if label_map is None:
@@ -115,11 +125,11 @@ class RealWaferDataset(Dataset):
                 'is_defect': is_defect
             }
 
-        # Diagnostic: print the actual label assignment so users can verify
+        # Print label assignment for verification
         print(f"[RealWaferDataset] Label assignment:")
         for label_id, info in sorted(self.class_info.items()):
             tag = " (Nuisance)" if info['is_defect'] == 0 else ""
-            print(f"  label={label_id} → {info['name']}{tag}")
+            print(f"  label={label_id} -> {info['name']}{tag}")
 
     def _scan_three_views(self):
         """扫描每个类别的图片，识别三视角组合"""
@@ -149,13 +159,16 @@ class RealWaferDataset(Dataset):
 
     def _group_three_views(self, img_files: List[Path]) -> List[List[Path]]:
         """
-        将图片分组为三视角组合。
+        将图片分组为三视角组合或单视角列表。
 
-        命名格式: D234569@123456W1234567890F12345678I00K12345678
+        命名格式 (3-view): D234569@123456W1234567890F12345678I00K12345678
         K前面的数字(00/01/02)表示同一defect的第几张图
 
+        When use_three_views=False: each image is a separate sample.
+        When use_three_views=True: group by I00K/I01K/I02K, duplicate missing views.
+
         Returns:
-            List of [path1, path2, path3] groups
+            List of [path1, path2, path3] groups (3-view) or [[path], ...] (single-view)
         """
         import re
 
@@ -165,13 +178,13 @@ class RealWaferDataset(Dataset):
         for f in img_files:
             name = f.stem
 
-            # 模式: Dxxxxx...IxxKxxxxxx (K前面2位数字表示视角序号)
+            # Pattern: Dxxxxx...IxxKxxxxxx (K前面2位数字表示视角序号)
             match = re.match(r'(.*I)(\d{2})(K.*)', name)
             if match:
                 base = match.group(1) + match.group(3)  # Dxxxxx...I + Kxxxxxx
                 view_idx = int(match.group(2))  # 00, 01, 02
             else:
-                # Fallback: 单张图片
+                # Fallback: single image
                 base = name
                 view_idx = 0
 
@@ -180,50 +193,43 @@ class RealWaferDataset(Dataset):
             base_patterns[base][view_idx] = f
 
         for base, views_dict in base_patterns.items():
-            if len(views_dict) == 3 and set(views_dict.keys()) == {0, 1, 2}:
-                # 完整的3视角，按顺序排列
-                groups.append([views_dict[0], views_dict[1], views_dict[2]])
-            elif len(views_dict) == 1:
-                # 单张图片，复制为三视角
-                single_path = list(views_dict.values())[0]
-                groups.append([single_path, single_path, single_path])
+            if self.use_three_views:
+                if len(views_dict) == 3 and set(views_dict.keys()) == {0, 1, 2}:
+                    # Complete 3 views
+                    groups.append([views_dict[0], views_dict[1], views_dict[2]])
+                elif len(views_dict) == 1:
+                    # Single image, duplicate to 3 views
+                    single_path = list(views_dict.values())[0]
+                    groups.append([single_path, single_path, single_path])
+            else:
+                # Single-view mode: each image is a sample
+                for path in views_dict.values():
+                    groups.append([path])
 
         return groups
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _load_and_preprocess(self, img_path: Path) -> np.ndarray:
-        """加载并预处理单张图片"""
-        img = Image.open(str(img_path)).convert('RGB')
-
-        # 裁剪底部尺度区域
-        if self.crop_bottom > 0:
-            w, h = img.size
-            if h > self.crop_bottom:
-                img = img.crop((0, 0, w, h - self.crop_bottom))
-
-        # resize到统一尺寸
-        img = img.resize((self.img_size, self.img_size), Image.BILINEAR)
-
-        # 归一化到 [0, 1]
-        img = np.array(img, dtype=np.float32) / 255.0
-
-        return img
-
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.samples[idx]
 
-        views = []
-        for path in sample['paths']:
-            img = self._load_and_preprocess(path)
-            img = torch.from_numpy(img).permute(2, 0, 1).float()
-
+        # Load and preprocess image(s)
+        if self.use_three_views:
+            views = []
+            for path in sample['paths']:
+                img = self.preprocessor.preprocess(path)
+                if self.transform:
+                    img = self.transform(img)
+                views.append(img)
+            views = torch.stack(views)  # [3, C, H, W]
+        else:
+            # Single-view mode: return [C, H, W]
+            path = sample['paths'][0]
+            img = self.preprocessor.preprocess(path)
             if self.transform:
                 img = self.transform(img)
-            views.append(img)
-
-        views = torch.stack(views)
+            views = img
 
         label = sample['label']
         is_defect = sample['is_defect']
@@ -250,7 +256,7 @@ class RealWaferDataset(Dataset):
 class SyntheticWaferGenerator:
     """Generate synthetic wafer SEM-like images for code verification."""
 
-    def __init__(self, img_size: int = 224):
+    def __init__(self, img_size: int = 256):
         self.img_size = img_size
         self.footer_height = int(img_size * 0.15)
 
@@ -280,6 +286,7 @@ class SyntheticWaferGenerator:
         if defect_type == 0:
             pass  # Nuisance - clean
         elif defect_type == 1:
+            # Scratch
             num_scratches = random.randint(1, 3)
             pil_img = Image.fromarray((img[:main_h] * 255).astype(np.uint8))
             draw = ImageDraw.Draw(pil_img)
@@ -289,6 +296,7 @@ class SyntheticWaferGenerator:
                 draw.line([(x1, y1), (x2, y2)], fill=round(1.5 * 255), width=2)
             img[:main_h] = np.array(pil_img, dtype=np.float32) / 255.0
         elif defect_type == 2:
+            # Particles
             num_particles = random.randint(5, 15)
             pil_img = Image.fromarray((img[:main_h] * 255).astype(np.uint8))
             draw = ImageDraw.Draw(pil_img)
@@ -298,6 +306,7 @@ class SyntheticWaferGenerator:
                 draw.ellipse([x - r, y - r, x + r, y + r], fill=255)
             img[:main_h] = np.array(pil_img, dtype=np.float32) / 255.0
         elif defect_type == 3:
+            # Pattern distortion
             x1, y1 = random.randint(0, w // 2), random.randint(0, main_h - 1)
             pil_img = Image.fromarray((img[:main_h] * 255).astype(np.uint8))
             draw = ImageDraw.Draw(pil_img)
@@ -308,6 +317,7 @@ class SyntheticWaferGenerator:
                 draw.point([(x1, y1)], fill=255)
             img[:main_h] = np.array(pil_img, dtype=np.float32) / 255.0
         else:
+            # Other defects (spots)
             num_spots = random.randint(1, 5)
             pil_img = Image.fromarray((img[:main_h] * 255).astype(np.uint8))
             draw = ImageDraw.Draw(pil_img)
@@ -336,7 +346,7 @@ class SyntheticWaferGenerator:
         img = self.add_defect_pattern(img, defect_type, view_seed + 1000)
         img = self.add_scale_bar(img)
         img = (img - img.min()) / (img.max() - img.min() + 1e-8)
-        img = np.stack([img] * 3, axis=-1)
+        img = np.stack([img] * 3, axis=-1)  # Convert to RGB
         return img
 
     def generate_sample(self, label: int, is_defect: int, defect_type: int,
@@ -356,78 +366,11 @@ class SyntheticWaferGenerator:
         )
 
 
-class WaferDefectDataset(Dataset):
-    """
-    Wafer defect dataset for 3-view classification (synthetic data).
-    """
-
-    def __init__(
-        self,
-        samples: List[WaferDefectSample],
-        transform=None,
-        crop_footer: bool = True,
-        footer_pixels: int = 40
-    ):
-        self.samples = samples
-        self.transform = transform
-        self.crop_footer = crop_footer
-        self.footer_pixels = footer_pixels
-        self._build_class_info()
-
-    def _build_class_info(self):
-        """Infer class_info from the samples (same layout as RealWaferDataset)."""
-        label_ids = sorted({s.label for s in self.samples})
-        self.class_info = {}
-        for lid in label_ids:
-            if lid == 0:
-                name = "Nuisance"
-            else:
-                name = f"Defect_{lid}"
-            self.class_info[lid] = {"name": name, "is_defect": 0 if lid == 0 else 1}
-
-    def get_class_names(self) -> List[str]:
-        """Return class names in label order (index = label id, matches RealWaferDataset)."""
-        return [self.class_info[i]["name"] for i in sorted(self.class_info.keys())]
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        sample = self.samples[idx]
-
-        views = []
-        for img in sample.images:
-            if self.crop_footer:
-                h = img.shape[0]
-                main = img[:h - self.footer_pixels] if h > self.footer_pixels else img
-            else:
-                main = img
-
-            main = torch.from_numpy(main.copy()).permute(2, 0, 1).float()
-
-            if self.transform:
-                main = self.transform(main)
-
-            views.append(main)
-
-        views = torch.stack(views)
-
-        return {
-            "images": views,
-            "label": torch.tensor(sample.label, dtype=torch.long),
-            "is_defect": torch.tensor(sample.is_defect, dtype=torch.long),
-            "defect_type": torch.tensor(
-                sample.defect_type if sample.defect_type is not None else -1,
-                dtype=torch.long
-            )
-        }
-
-
 def generate_synthetic_dataset(
     num_samples: int = 100,
     num_defect_classes: int = 10,
     nuisance_ratio: float = 0.3,
-    img_size: int = 224,
+    img_size: int = 256,
     seed: int = 42
 ) -> Tuple[List[WaferDefectSample], List[WaferDefectSample]]:
     """Generate synthetic wafer defect dataset for verification."""
@@ -464,28 +407,115 @@ def generate_synthetic_dataset(
     return all_samples[:split_idx], all_samples[split_idx:]
 
 
+class _SyntheticDataset(Dataset):
+    """Dataset wrapper for synthetic samples with preprocessing."""
+
+    def __init__(
+        self,
+        samples: List[WaferDefectSample],
+        preprocessor: Optional[WaferPreprocessor] = None,
+        transform=None,
+        crop_footer: bool = True,
+        footer_pixels: int = DEFAULT_CROP_BOTTOM,
+        use_three_views: bool = False,
+    ):
+        self.samples = samples
+        self.transform = transform
+        self.crop_footer = crop_footer
+        self.footer_pixels = footer_pixels
+        self.use_three_views = use_three_views
+
+        # Use provided preprocessor or create default
+        self.preprocessor = preprocessor or WaferPreprocessor()
+
+        self._build_class_info()
+
+    def _build_class_info(self):
+        """Infer class_info from samples."""
+        label_ids = sorted({s.label for s in self.samples})
+        self.class_info = {}
+        for lid in label_ids:
+            if lid == 0:
+                name = "Nuisance"
+            else:
+                name = f"Defect_{lid}"
+            self.class_info[lid] = {"name": name, "is_defect": 0 if lid == 0 else 1}
+
+    def get_class_names(self) -> List[str]:
+        """Return class names in label order."""
+        return [self.class_info[i]["name"] for i in sorted(self.class_info.keys())]
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        sample = self.samples[idx]
+
+        if self.use_three_views:
+            views = []
+            for img in sample.images:
+                if self.crop_footer:
+                    h = img.shape[0]
+                    img = img[:h - self.footer_pixels] if h > self.footer_pixels else img
+                tensor = torch.from_numpy(img.copy()).permute(2, 0, 1).float()
+                tensor = self.preprocessor.normalize(tensor)
+                if self.transform:
+                    tensor = self.transform(tensor)
+                views.append(tensor)
+            views = torch.stack(views)  # [3, C, H, W]
+        else:
+            # Single-view mode: use first view
+            img = sample.images[0]
+            if self.crop_footer:
+                h = img.shape[0]
+                img = img[:h - self.footer_pixels] if h > self.footer_pixels else img
+            tensor = torch.from_numpy(img.copy()).permute(2, 0, 1).float()
+            tensor = self.preprocessor.normalize(tensor)
+            if self.transform:
+                tensor = self.transform(tensor)
+            views = tensor
+
+        return {
+            "images": views,
+            "label": torch.tensor(sample.label, dtype=torch.long),
+            "is_defect": torch.tensor(sample.is_defect, dtype=torch.long),
+            "defect_type": torch.tensor(
+                sample.defect_type if sample.defect_type is not None else -1,
+                dtype=torch.long
+            )
+        }
+
+
 def create_dataloaders(
     train_samples: List[WaferDefectSample],
     val_samples: List[WaferDefectSample],
     batch_size: int = 8,
     num_workers: int = 4,
+    img_size: int = DEFAULT_IMG_SIZE,
     crop_footer: bool = True,
-    footer_pixels: int = 40
+    footer_pixels: int = DEFAULT_CROP_BOTTOM,
+    use_three_views: bool = False,
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """Create train and validation dataloaders for synthetic data."""
+    # Create preprocessor for synthetic data
+    preprocessor = WaferPreprocessor(img_size=img_size, crop_bottom=footer_pixels)
 
-    train_dataset = WaferDefectDataset(
+    train_dataset = _SyntheticDataset(
         samples=train_samples,
+        preprocessor=preprocessor,
         transform=None,
         crop_footer=crop_footer,
-        footer_pixels=footer_pixels
+        footer_pixels=footer_pixels,
+        use_three_views=use_three_views,
     )
 
-    val_dataset = WaferDefectDataset(
+    val_dataset = _SyntheticDataset(
         samples=val_samples,
+        preprocessor=preprocessor,
         transform=None,
         crop_footer=crop_footer,
-        footer_pixels=footer_pixels
+        footer_pixels=footer_pixels,
+        use_three_views=use_three_views,
     )
 
     train_loader = torch.utils.data.DataLoader(
@@ -505,10 +535,11 @@ def create_real_dataloaders(
     data_dir: str,
     batch_size: int = 8,
     num_workers: int = 4,
-    img_size: int = 224,
-    crop_bottom: int = 40,
+    img_size: int = DEFAULT_IMG_SIZE,
+    crop_bottom: int = DEFAULT_CROP_BOTTOM,
     train_split: float = 0.8,
-    nuisance_name: str = "Nuisance"
+    nuisance_name: str = "Nuisance",
+    use_three_views: bool = False,
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """
     Create train and validation dataloaders from real folder structure.
@@ -521,6 +552,7 @@ def create_real_dataloaders(
         crop_bottom: 底部裁剪像素数
         train_split: 训练集比例
         nuisance_name: 正常类别文件夹名称
+        use_three_views: 是否启用三视角融合模式（默认False）
 
     Returns:
         train_loader, val_loader
@@ -529,7 +561,8 @@ def create_real_dataloaders(
         root_dir=data_dir,
         img_size=img_size,
         crop_bottom=crop_bottom,
-        nuisance_name=nuisance_name
+        nuisance_name=nuisance_name,
+        use_three_views=use_three_views,
     )
 
     total = len(full_dataset)
