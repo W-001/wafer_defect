@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import os
+import platform
 from pathlib import Path
 from typing import Union, Optional, List, Dict
 
@@ -49,18 +50,12 @@ def apply_heatmap(gray: np.ndarray, colormap: str = 'jet') -> np.ndarray:
     Returns: [H, W, 3] uint8
     """
     try:
-        import matplotlib.cm as cm
-        default_cmap = {
-            'jet': cm.get_cmap('jet'),
-            'hot': cm.get_cmap('hot'),
-            'inferno': cm.get_cmap('inferno'),
-            'magma': cm.get_cmap('magma'),
-        }
-        cmap_fn = default_cmap.get(colormap, cm.get_cmap('jet'))
+        import matplotlib.pyplot as plt
+        cmap_fn = plt.get_cmap(colormap)
         rgba = cmap_fn(np.clip(gray, 0, 1))
         rgb = (rgba[:, :, :3] * 255).astype(np.uint8)
         return rgb
-    except ImportError:
+    except (ImportError, AttributeError):
         # Fallback: simple grayscale
         return np.stack([gray * 255] * 3, axis=-1).astype(np.uint8)
 
@@ -117,7 +112,7 @@ class WaferDefectInferencer:
         model_path: str = None,
         device: str = 'cuda',
         class_names: List[str] = None,
-        use_dinomaly2: bool = True,
+        use_dinomaly: bool = True,
         use_synthetic: bool = False,
     ):
         self.device = device
@@ -134,12 +129,6 @@ class WaferDefectInferencer:
         self.model.to(device)
         self.model.eval()
 
-        # Load Dinomaly2 if available
-        if use_dinomaly2 and hasattr(self.model, 'dinomaly2'):
-            dinomaly_path = model_path.replace('.pt', '_dinomaly2.pt') if model_path else None
-            if dinomaly_path and os.path.exists(dinomaly_path):
-                self.model.dinomaly2.load(dinomaly_path, device=device)
-
     def _load_model(self, model_path: str, use_synthetic: bool = False) -> torch.nn.Module:
         """Load model from checkpoint."""
         checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
@@ -147,20 +136,47 @@ class WaferDefectInferencer:
         if use_synthetic:
             model = WaferDefectModelSimple(num_defect_classes=len(self.class_names))
         else:
-            # Detect configuration from checkpoint
-            num_classes = checkpoint.get('num_classes', len(self.class_names))
+            # Detect number of defect classes from checkpoint
+            # Try to get from class_centers shape first
+            if 'class_centers' in checkpoint:
+                num_defect_classes = checkpoint['class_centers'].shape[0]
+            elif 'classification' in checkpoint:
+                # Get from fine_head classifier weight shape
+                state_dict = checkpoint['classification']
+                for k in state_dict:
+                    if 'fine_head' in k and 'classifier' in k and 'weight' in k:
+                        num_defect_classes = state_dict[k].shape[0]
+                        break
+                else:
+                    num_defect_classes = len(self.class_names)
+            else:
+                num_defect_classes = len(self.class_names)
+
+            print(f"[Inference] Detected {num_defect_classes} defect classes from checkpoint")
+
             model = WaferDefectModel(
-                num_defect_classes=num_classes,
+                num_defect_classes=num_defect_classes,
                 backbone_name='dinov3_vitl16',
                 pretrained_path='dinov3/weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth',
-                use_dinomaly2=True,
+                use_dinomaly=True,
+                dinomaly_config={'img_size': 224},  # Use 224 as default
             )
 
-        # Load state dict
+        # Load state dict - handle both old and new checkpoint formats
         if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         elif 'classification' in checkpoint:
-            model.classification.load_state_dict(checkpoint['classification'])
+            model.classification.load_state_dict(checkpoint['classification'], strict=False)
+
+        # Load class centers if available
+        if 'class_centers' in checkpoint:
+            model.class_centers.data = checkpoint['class_centers'].to(model.class_centers.device)
+
+        # Load Dinomaly if available
+        # Training saves as "dinomaly_decoder.pt", so check output directory
+        dinomaly_path = os.path.join(os.path.dirname(model_path), 'dinomaly_decoder.pt')
+        if os.path.exists(dinomaly_path):
+            model.dinomaly.load(dinomaly_path, device='cpu')
 
         return model
 
@@ -421,9 +437,12 @@ def main():
     else:
         if args.data_dir is None:
             raise ValueError("--data_dir required for real data")
+        # Windows: num_workers=0 to avoid multiprocessing pickle issues
+        num_workers = 0 if platform.system() == 'Windows' else 4
         train_loader, val_loader = create_real_dataloaders(
             data_dir=args.data_dir,
             batch_size=8,
+            num_workers=num_workers,
         )
         class_names = sorted([d for d in os.listdir(args.data_dir) if os.path.isdir(os.path.join(args.data_dir, d))])
         val_loader_iter = iter(val_loader)
@@ -433,40 +452,47 @@ def main():
     # Load model
     if args.checkpoint and os.path.exists(args.checkpoint):
         print(f"[Inference] Loading model from {args.checkpoint}")
-        model = WaferDefectModelSimple(num_defect_classes=len(class_names) - 1) if args.synthetic else None
-        # For simplicity, use synthetic model
-        model = WaferDefectModelSimple(num_defect_classes=len(class_names) - 1)
+        # Use WaferDefectInferencer to load checkpoint properly
+        inferencer = WaferDefectInferencer(
+            model_path=args.checkpoint,
+            device=device,
+            class_names=class_names[1:],  # Exclude Nuisance
+            use_synthetic=args.synthetic,
+        )
     else:
         print(f"[Inference] No checkpoint, using untrained model for demo")
         model = WaferDefectModelSimple(num_defect_classes=len(class_names) - 1)
-
-    # Create inferencer
-    inferencer = WaferDefectInferencer(
-        model=model,
-        device=device,
-        class_names=class_names[1:],  # Exclude Nuisance
-        use_synthetic=args.synthetic,
-    )
+        inferencer = WaferDefectInferencer(
+            model=model,
+            device=device,
+            class_names=class_names[1:],  # Exclude Nuisance
+            use_synthetic=args.synthetic,
+        )
 
     # Run inference
     print(f"[Inference] Running inference...")
+    sample_idx = 0
     for i, batch in enumerate(val_loader_iter):
-        if i >= args.num_samples // 8:
+        if sample_idx >= args.num_samples:
             break
 
         images = batch['images']
-        results = inferencer.predict_batch({'images': images})
+        B = images.shape[0]
+        for j in range(B):
+            if sample_idx >= args.num_samples:
+                break
 
-        for j, result in enumerate(results):
-            print(f"  Sample {i*8+j}: is_defect={result['is_defect']}, "
+            result = inferencer.predict(images[j], return_heatmap=True)
+            print(f"  Sample {sample_idx}: is_defect={result['is_defect']}, "
                   f"type={result['defect_type']}, conf={result['confidence']:.2f}")
 
             # Save visualization
             vis = inferencer.visualize(
                 images[j],
                 result=result,
-                save_path=os.path.join(args.output_dir, f'sample_{i*8+j}.png'),
+                save_path=os.path.join(args.output_dir, f'sample_{sample_idx}.png'),
             )
+            sample_idx += 1
 
     print(f"[Inference] Done. Results saved to {args.output_dir}")
 

@@ -24,7 +24,7 @@ conda activate py310
 **核心特性**：
 - DINOv3 Backbone (冻结)
 - 共享特征塔 + Gate/Fine 分类头
-- Dinomaly2 异常检测 (arXiv 2510.17611v2)
+- Dinomaly 异常检测 (开源: https://github.com/cnulab/Dinomaly)
 - 可选三视角融合
 
 ## 常用命令
@@ -35,10 +35,19 @@ conda activate py310
 cd C:/Code/Work/DefectClass_dinov3
 
 # 合成数据 (快速测试)
-PYTHONPATH=. python wafer_defect/train.py --synthetic --epochs 10 --device cpu
+set PYTHONPATH=. && python wafer_defect/train.py --synthetic --epochs 10 --device cpu
 
 # 真实数据
-PYTHONPATH=. python wafer_defect/train.py --data_dir /path/to/wafer_data --use_dinov3 --epochs 10 --device cuda
+set PYTHONPATH=. && python wafer_defect/train.py --data_dir /path/to/wafer_data --epochs 10 --device cuda
+
+# 完整训练 (含 Dinomaly)
+set PYTHONPATH=. && python wafer_defect/train.py --data_dir /path/to/wafer_data --use_dinomaly --dinomaly_iters 100 --epochs 10 --device cuda
+```
+
+### 推理
+
+```shell
+set PYTHONPATH=. && python wafer_defect/inference.py --checkpoint output/best_model.pt --data_dir /path/to/test_data --device cuda --output_dir output/inference
 ```
 
 ## 数据格式
@@ -62,35 +71,36 @@ data/
 ```
 wafer_defect/
 ├── models/              # 模型定义
+│   ├── __init__.py
 │   ├── backbone.py      # DINOv3 封装
 │   ├── classification.py # 分类分支 (Gate + Fine)
-│   ├── dinomaly2.py     # Dinomaly2 异常检测
+│   ├── dinomaly.py     # Dinomaly 异常检测 (开源)
 │   ├── defect_model.py  # 主模型
-│   └── fusion.py        # 三视角融合
+│   ├── fusion.py        # 三视角融合
+│   └── open_set_detector.py # 开放集检测
 ├── losses/              # 损失函数
+│   ├── __init__.py
 │   ├── gate_loss.py     # Gate 损失
 │   ├── fine_loss.py     # Fine 损失
 │   ├── metric_loss.py   # Metric 损失
-│   └── dinomaly_loss.py # Dinomaly2 损失
+│   ├── dinomaly_loss.py # Dinomaly 损失
+│   └── combined_loss.py # 组合损失
 ├── engine/              # 训练引擎
+│   ├── __init__.py
 │   ├── trainer.py        # 训练器
 │   ├── sampler.py        # 长尾采样
 │   └── collate.py       # 数据整理
 ├── data/                # 数据处理
+│   ├── __init__.py
 │   ├── dataset.py        # 数据集
 │   └── preprocessor.py  # 预处理
+├── utils/               # 工具函数
+│   ├── __init__.py
+│   ├── metrics.py        # 评估指标
+│   └── data_inspector.py # 数据检查
 ├── inference.py          # 推理入口
 └── train.py             # 训练入口
 ```
-
-## 新增模块
-
-- [x] `models/classification.py` - 分类分支
-- [x] `models/dinomaly2.py` - Dinomaly2 分支
-- [x] `models/defect_model.py` - 主模型
-- [x] `losses/` - 损失函数模块
-- [x] `engine/` - 训练引擎
-- [x] `inference.py` - 推理入口
 
 ## 技术细节
 
@@ -102,18 +112,18 @@ wafer_defect/
 - 多分类: 缺陷类型
 - 仅在 defect 样本上计算损失
 
-### Dinomaly2 异常检测
+### Dinomaly 异常检测
 - 基于 Loose Reconstruction
-- Noisy Bottleneck + Linear Attention
-- Context-Aware Recentering
+- ViTill 架构
+- 识别未知缺陷类型
 
 ### 开放集检测
-- 组合策略: Dinomaly2 + 距离类中心
+- 组合策略: Dinomaly + 距离类中心
 - 识别未知缺陷类型
 
 ## 注意事项
 
 1. **DINOv3 权重**: `dinov3/weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth`
-2. **PYTHONPATH**: 必须包含项目根目录
-3. **图像尺寸**: 默认 392×392 (DINOv3)
+2. **PYTHONPATH**: 必须包含项目根目录 (Windows 下使用 `set PYTHONPATH=.`)
+3. **图像尺寸**: 默认 224×224 (可用 --img_size 392 获取更好效果)
 4. **底部裁剪**: 默认裁剪 40px (标尺区域)

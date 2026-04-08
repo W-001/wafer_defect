@@ -45,8 +45,10 @@ def parse_args():
     # ─────────────────────────────────────────────────────────────────────────
     # Model architecture
     # ─────────────────────────────────────────────────────────────────────────
-    parser.add_argument("--use_dinov3", action="store_true",
-                        help="Use DINOv3 backbone (default: simple CNN)")
+    parser.add_argument("--use_dinov3", type=bool, default=True,
+                        help="Use DINOv3 backbone (default: True)")
+    parser.add_argument("--no_dinov3", action="store_true",
+                        help="Disable DINOv3, use simple CNN instead")
     parser.add_argument("--backbone", type=str, default="dinov3_vitl16",
                         help="Backbone name (default: dinov3_vitl16)")
     parser.add_argument("--pretrained_path", type=str,
@@ -56,18 +58,20 @@ def parse_args():
                         help="Enable 3-view fusion mode (requires I00K/I01K/I02K naming)")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Dinomaly2 anomaly detection
+    # Dinomaly anomaly detection (open-source)
     # ─────────────────────────────────────────────────────────────────────────
-    parser.add_argument("--use_dinomaly2", action="store_true", default=True,
-                        help="Use Dinomaly2 (arXiv 2510.17611v2) anomaly detection")
-    parser.add_argument("--dinomaly2_iters", type=int, default=40000,
-                        help="Training iterations for Dinomaly2 decoder")
-    parser.add_argument("--dinomaly2_lr", type=float, default=2e-3,
-                        help="Learning rate for Dinomaly2 decoder")
-    parser.add_argument("--dinomaly2_layers", nargs='+', type=int, default=[3, 4, 5, 6, 7, 8, 9, 10],
-                        help="DINOv3 layer indices for Dinomaly2")
-    parser.add_argument("--dinomaly2_dropout", type=float, default=0.2,
-                        help="Dropout rate for Dinomaly2 Noisy Bottleneck")
+    parser.add_argument("--use_dinomaly", type=bool, default=True,
+                        help="Use Dinomaly (open-source) anomaly detection (default: True)")
+    parser.add_argument("--no_dinomaly", action="store_true",
+                        help="Disable Dinomaly")
+    parser.add_argument("--dinomaly_iters", type=int, default=10000,
+                        help="Training iterations for Dinomaly decoder")
+    parser.add_argument("--dinomaly_lr", type=float, default=2e-3,
+                        help="Learning rate for Dinomaly decoder")
+    parser.add_argument("--dinomaly_layers", nargs='+', type=int, default=[3, 4, 5, 6, 7, 8, 9, 10],
+                        help="DINOv3 layer indices for Dinomaly")
+    parser.add_argument("--dinomaly_dropout", type=float, default=0.2,
+                        help="Dropout rate for Dinomaly")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Data parameters
@@ -80,8 +84,8 @@ def parse_args():
                         help="Ratio of nuisance samples")
     parser.add_argument("--nuisance_name", type=str, default="Nuisance",
                         help="Folder name for nuisance class")
-    parser.add_argument("--img_size", type=int, default=392,
-                        help="Image resize size (use 392 for DINOv3)")
+    parser.add_argument("--img_size", type=int, default=224,
+                        help="Image resize size (use 392 for best quality with DINOv3)")
     parser.add_argument("--crop_bottom", type=int, default=40,
                         help="Bottom crop pixels (scale bar area)")
 
@@ -111,17 +115,23 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Handle --no_dinov3 and --no_dinomaly flags
+    if args.no_dinov3:
+        args.use_dinov3 = False
+    if args.no_dinomaly:
+        args.use_dinomaly = False
+
     # ─────────────────────────────────────────────────────────────────────────
     # Print configuration
     # ─────────────────────────────────────────────────────────────────────────
     print("=" * 60)
     print("Wafer Defect Classification Training")
-    print("Architecture: DINOv3 + Gate/Fine + Dinomaly2")
+    print("Architecture: DINOv3 + Gate/Fine + Dinomaly")
     print("=" * 60)
     print(f"Device: {args.device}")
     print(f"Backbone: {'DINOv3' if args.use_dinov3 else 'Simple CNN'}")
     print(f"3-view fusion: {args.three_views}")
-    print(f"Dinomaly2: {args.use_dinomaly2}")
+    print(f"Dinomaly: {args.use_dinomaly}")
     print(f"Data: {'Synthetic' if args.synthetic else f'Real ({args.data_dir})'}")
     print()
 
@@ -179,17 +189,18 @@ def main():
             pretrained_path=args.pretrained_path,
             embed_dim=args.embed_dim,
             defect_weight=args.defect_weight,
-            use_dinomaly2=args.use_dinomaly2,
-            dinomaly2_config={
+            use_dinomaly=args.use_dinomaly,
+            dinomaly_config={
                 'img_size': args.img_size,
-                'layer_indices': args.dinomaly2_layers,
-                'training_iters': args.dinomaly2_iters,
-                'lr': args.dinomaly2_lr,
-                'dropout': args.dinomaly2_dropout,
+                'layer_indices': args.dinomaly_layers,
+                'lr': args.dinomaly_lr,
+                'dropout': args.dinomaly_dropout,
+                'iters': args.dinomaly_iters,
             },
         )
-        print(f"    Dinomaly2: enabled")
-        print(f"    Dinomaly2 layers: {args.dinomaly2_layers}")
+        print(f"    Dinomaly: {'enabled' if args.use_dinomaly else 'disabled'}")
+        print(f"    Dinomaly layers: {args.dinomaly_layers}")
+        print(f"    Dinomaly iters: {args.dinomaly_iters}")
     else:
         model = WaferDefectModelSimple(
             num_defect_classes=num_defect_classes,
@@ -265,24 +276,39 @@ def main():
         })
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Train Dinomaly2 decoder (Phase 2)
+    # Train Dinomaly decoder (Phase 2)
     # ─────────────────────────────────────────────────────────────────────────
-    if args.use_dinov3 and args.use_dinomaly2 and hasattr(model, 'train_dinomaly2'):
+    if args.use_dinov3 and args.use_dinomaly and hasattr(model, 'train_dinomaly'):
         print("\n" + "=" * 60)
-        print("Phase 2: Training Dinomaly2 Decoder")
+        print("Phase 2: Training Dinomaly Decoder")
         print("=" * 60)
 
         # Load best model first
         best_ckpt_path = os.path.join(args.output_dir, "best_model.pt")
         if os.path.exists(best_ckpt_path):
             trainer.load_checkpoint(best_ckpt_path)
-            print("Loaded best model for Dinomaly2 training...")
+            print("Loaded best model for Dinomaly training...")
 
-        dinomaly2_path = os.path.join(args.output_dir, "dinomaly2_decoder.pt")
-        model.train_dinomaly2(
-            defect_loader=train_loader,
+        # Collect defect images from train_loader
+        print("Collecting defect images...")
+        defect_images = []
+        for batch in train_loader:
+            imgs = batch['images']
+            is_defect = batch['is_defect']
+            defect_mask = is_defect == 1
+            if defect_mask.sum() > 0:
+                defect_images.append(imgs[defect_mask])
+        defect_images = torch.cat(defect_images, dim=0)
+        print(f"  Total defect images: {len(defect_images)}")
+
+        # Save the checkpoint path
+        dinomaly_path = os.path.join(args.output_dir, "dinomaly_decoder.pt")
+
+        # Train Dinomaly with defect images
+        model.train_dinomaly(
+            train_images=defect_images,
             device=args.device,
-            save_path=dinomaly2_path,
+            save_path=dinomaly_path,
         )
 
     # ─────────────────────────────────────────────────────────────────────────

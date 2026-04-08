@@ -4,7 +4,8 @@ Wafer Defect Classification Models - New Architecture.
 Architecture:
 - backbone.py: DINOv3 backbone (frozen)
 - classification.py: Classification branch (Gate + Fine heads with shared feature tower)
-- dinomaly2.py: Dinomaly2 anomaly detection branch
+- dinomaly.py: Dinomaly anomaly detection (open-source)
+- open_set_detector.py: Open-set detection for unknown defects
 - defect_model.py: Complete model composition
 - fusion.py: Multi-view fusion (optional)
 """
@@ -19,24 +20,20 @@ from .classification import (
     GateToFineModulation,
     PrototypeClassifier,
 )
-from .dinomaly2 import (
-    Dinomaly2Branch,
-    Dinomaly2Loss,
-    OpenSetDetector,
-)
 from .defect_model import (
     WaferDefectModel,
     WaferDefectModelSimple,
 )
+from .open_set_detector import OpenSetDetector
 
-# Dinomaly head (used internally by Dinomaly2Branch)
-from .dinomaly_head import (
-    Dinomaly2AnomalyHead,
-    NoisyBottleneck2,
-    LinearAttention2,
-    ViTill2,
-    loose_reconstruction_loss,
-)
+# Dinomaly (open-source) - anomaly detection
+try:
+    from .dinomaly import DinomalyAnomalyDetector
+    DINOMALY_AVAILABLE = True
+except ImportError as e:
+    DINOMALY_AVAILABLE = False
+    DinomalyAnomalyDetector = None
+    print(f"[Warning] Dinomaly not available: {e}")
 
 __all__ = [
     # Backbone
@@ -51,9 +48,9 @@ __all__ = [
     "GateToFineModulation",
     "PrototypeClassifier",
     # Anomaly detection
-    "Dinomaly2Branch",
-    "Dinomaly2AnomalyHead",
-    "Dinomaly2Loss",
+    "DinomalyAnomalyDetector",
+    "DINOMALY_AVAILABLE",
+    # Open-set detection
     "OpenSetDetector",
     # Models
     "WaferDefectModel",

@@ -4,7 +4,7 @@ DefectModel: Complete Wafer Defect Detection Model.
 This module implements the full wafer defect detection pipeline:
 - DINOv3 backbone (frozen)
 - Classification branch (Gate + Fine)
-- Dinomaly2 anomaly detection branch
+- Dinomaly anomaly detection (open-source)
 - Open-set detection (unknown defect identification)
 
 Architecture:
@@ -20,7 +20,10 @@ import torch.nn.functional as F
 
 from .backbone import DINOv3Backbone
 from .classification import ClassificationBranch, GateHead, FineHead, PrototypeClassifier
-from .dinomaly2 import Dinomaly2Branch, OpenSetDetector
+from .open_set_detector import OpenSetDetector
+
+# Import Dinomaly from dinomaly.py (open-source implementation)
+from .dinomaly import DinomalyAnomalyDetector
 
 
 class WaferDefectModel(nn.Module):
@@ -30,7 +33,7 @@ class WaferDefectModel(nn.Module):
     Combines:
     - DINOv3 backbone for feature extraction
     - ClassificationBranch for gate and fine classification
-    - Dinomaly2Branch for anomaly detection
+    - DinomalyAnomalyDetector for anomaly detection (open-source)
     - OpenSetDetector for unknown defect identification
     """
 
@@ -43,8 +46,8 @@ class WaferDefectModel(nn.Module):
         hidden_dim: int = 512,
         defect_weight: float = 3.0,
         use_gate_modulation: bool = True,
-        use_dinomaly2: bool = True,
-        dinomaly2_config: dict = None,
+        use_dinomaly: bool = True,
+        dinomaly_config: dict = None,
         freeze_backbone: bool = True,
     ):
         super().__init__()
@@ -52,7 +55,7 @@ class WaferDefectModel(nn.Module):
         self.num_defect_classes = num_defect_classes
         self.embed_dim = embed_dim
         self.hidden_dim = hidden_dim
-        self.use_dinomaly2 = use_dinomaly2
+        self.use_dinomaly = use_dinomaly
 
         # 1. Backbone (frozen by default)
         self.backbone = DINOv3Backbone(
@@ -71,25 +74,22 @@ class WaferDefectModel(nn.Module):
             use_gate_modulation=use_gate_modulation,
         )
 
-        # 3. Dinomaly2 Anomaly Detection
-        if use_dinomaly2:
-            if dinomaly2_config is None:
-                dinomaly2_config = {}
-            self.dinomaly2 = Dinomaly2Branch(
-                backbone=self.backbone,
+        # 3. Dinomaly Anomaly Detection (open-source)
+        if use_dinomaly:
+            if dinomaly_config is None:
+                dinomaly_config = {}
+            self.dinomaly = DinomalyAnomalyDetector(
+                img_size=dinomaly_config.get('img_size', 392),
+                target_layers=dinomaly_config.get('layer_indices', [3, 4, 5, 6, 7, 8, 9, 10]),
                 embed_dim=embed_dim,
-                img_size=dinomaly2_config.get('img_size', 392),
-                layer_indices=dinomaly2_config.get('layer_indices', [3, 4, 5, 6, 7, 8, 9, 10]),
-                num_heads=dinomaly2_config.get('num_heads', 16),
-                num_decoder_blocks=dinomaly2_config.get('num_decoder_blocks', 8),
-                training_iters=dinomaly2_config.get('training_iters', 40000),
-                lr=dinomaly2_config.get('lr', 2e-3),
-                dropout=dinomaly2_config.get('dropout', 0.2),
-                grad_factor=dinomaly2_config.get('grad_factor', 0.1),
-                tau_warmup_iters=dinomaly2_config.get('tau_warmup_iters', 1000),
+                num_heads=dinomaly_config.get('num_heads', 16),
+                num_decoder_blocks=dinomaly_config.get('num_decoder_blocks', 8),
+                lr=dinomaly_config.get('lr', 2e-3),
+                dropout=dinomaly_config.get('dropout', 0.2),
+                iters=dinomaly_config.get('iters', 10000),
             )
         else:
-            self.dinomaly2 = None
+            self.dinomaly = None
 
         # 4. Open-set Detection
         self.open_set_detector = OpenSetDetector()
@@ -120,12 +120,14 @@ class WaferDefectModel(nn.Module):
             dict with:
                 - is_defect: [B] 0=Nuisance, 1=Defect
                 - defect_type: [B] predicted defect type index
+                - gate_logits: [B, 2] gate raw logits
+                - fine_logits: [B, num_classes] fine raw logits
                 - gate_prob: [B, 2] gate probabilities
                 - fine_prob: [B, num_classes] fine probabilities
+                - feat: [B, hidden_dim] shared features (if return_features)
                 - anomaly_score: [B] anomaly score (if mode includes 'anomaly')
                 - heatmap: [B, 1, H, W] anomaly heatmap (if return_heatmap)
                 - is_unknown: [B] 1=unknown defect, 0=known defect
-                - features: [B, hidden_dim] shared features (if return_features)
         """
         B = images.shape[0]
 
@@ -143,17 +145,19 @@ class WaferDefectModel(nn.Module):
         result = {
             'is_defect': is_defect,
             'defect_type': defect_type,
+            'gate_logits': gate_out['logits'],
+            'fine_logits': fine_out['logits'],
             'gate_prob': gate_out['prob'],
             'fine_prob': fine_out['prob'],
         }
 
         if return_features and 'features' in cls_outputs:
-            result['features'] = cls_outputs['features']
+            result['feat'] = cls_outputs['features']
 
         # 3. Anomaly Detection (only for defect samples)
-        if mode in ['all', 'anomaly'] and self.use_dinomaly2 and self.dinomaly2 is not None:
-            if self.dinomaly2.is_trained():
-                anomaly_out = self.dinomaly2(images, return_heatmap=return_heatmap)
+        if mode in ['all', 'anomaly'] and self.use_dinomaly and self.dinomaly is not None:
+            if self.dinomaly.is_trained():
+                anomaly_out = self.dinomaly(images, return_heatmap=return_heatmap)
                 anomaly_score = anomaly_out['anomaly_score']  # [B]
 
                 # Open-set detection
@@ -195,31 +199,34 @@ class WaferDefectModel(nn.Module):
         # Update open-set detector
         self.open_set_detector.set_class_centers(self.class_centers)
 
-    def train_dinomaly2(
+    def train_dinomaly(
         self,
-        defect_loader,
+        train_images: torch.Tensor,
         device: str = 'cuda',
         save_path: str = None,
-        log_interval: int = 500,
+        log_interval: int = 100,
     ):
         """
-        Train Dinomaly2 decoder on defect samples.
+        Train Dinomaly decoder on defect samples.
 
         Args:
-            defect_loader: DataLoader with defect samples
+            train_images: Tensor of training images [N, 3, H, W]
             device: device
             save_path: optional path to save trained decoder
             log_interval: print frequency
         """
-        if not self.use_dinomaly2 or self.dinomaly2 is None:
-            raise RuntimeError("Dinomaly2 is not enabled")
+        if not self.use_dinomaly or self.dinomaly is None:
+            raise RuntimeError("Dinomaly is not enabled")
 
-        self.dinomaly2.train_decoder(
-            defect_loader=defect_loader,
+        self.dinomaly.train_decoder(
+            train_images=train_images,
             device=device,
             save_path=save_path,
             log_interval=log_interval,
         )
+
+    # Alias for backward compatibility
+    train_dinomaly2 = train_dinomaly
 
     def save(self, path: str):
         """
@@ -237,10 +244,10 @@ class WaferDefectModel(nn.Module):
         }
         torch.save(checkpoint, path)
 
-        # Save Dinomaly2 separately if trained
-        if self.use_dinomaly2 and self.dinomaly2 is not None and self.dinomaly2.is_trained():
-            dinomaly_path = path.replace('.pt', '_dinomaly2.pt')
-            self.dinomaly2.save(dinomaly_path)
+        # Save Dinomaly separately if trained
+        if self.use_dinomaly and self.dinomaly is not None and self.dinomaly.is_trained():
+            dinomaly_path = path.replace('.pt', '_dinomaly.pt')
+            self.dinomaly.save(dinomaly_path)
 
     def load(self, path: str, device: str = 'cuda', load_dinomaly: bool = True):
         """
@@ -249,7 +256,7 @@ class WaferDefectModel(nn.Module):
         Args:
             path: path to checkpoint
             device: device
-            load_dinomaly: whether to load Dinomaly2 decoder
+            load_dinomaly: whether to load Dinomaly decoder
         """
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         self.classification.load_state_dict(checkpoint['classification'])
@@ -258,11 +265,11 @@ class WaferDefectModel(nn.Module):
         # Update open-set detector
         self.open_set_detector.set_class_centers(self.class_centers)
 
-        # Load Dinomaly2
+        # Load Dinomaly
         if load_dinomaly:
-            dinomaly_path = path.replace('.pt', '_dinomaly2.pt')
+            dinomaly_path = path.replace('.pt', '_dinomaly.pt')
             if os.path.exists(dinomaly_path):
-                self.dinomaly2.load(dinomaly_path, device=device)
+                self.dinomaly.load(dinomaly_path, device=device)
 
     def freeze_backbone(self):
         """Freeze backbone parameters."""
